@@ -15,6 +15,7 @@ Adapted and enhanced from
 |---|---|
 | `create-pve-lxc-gha-runner.sh` | Creates an unprivileged Ubuntu 24.04 LXC container and registers it as a GitHub Actions runner (Docker and other extra dependencies are optional — see [Installing extra dependencies](#installing-extra-dependencies)). Run by hand, or invoked automatically by the hookscript. |
 | `gha_runner_hookscript.sh` | Proxmox post-stop hookscript. Only used in ephemeral mode: when a runner container powers off after finishing its one job, this destroys it and creates its replacement. |
+| `gha-runner-hook.logrotate` | logrotate config for the hookscript's logs (`recreate.log`, `hook.log`). Only needed in ephemeral mode — see step 4 under [Ephemeral runner pool](#ephemeral-runner-pool-self-healing). |
 
 ## Prerequisites
 
@@ -132,8 +133,23 @@ without ever reusing container state between jobs.
    ./create-pve-lxc-gha-runner.sh
    ```
 
+4. Install the log rotation config, or `recreate.log`/`hook.log` under
+   `/var/lib/gha-runner-hook/` will grow unbounded:
+
+   ```sh
+   cp gha-runner-hook.logrotate /etc/logrotate.d/gha-runner-hook
+   ```
+
 From then on, the cycle is: container runs one job → powers off → hookscript
 destroys it → hookscript recreates it → repeat. No further manual steps.
+
+The hookscript re-invokes itself via `systemd-run` as a detached transient
+unit (falling back to a plain backgrounded job if `systemd-run` isn't
+available) rather than just backgrounding itself in place — this is what
+lets the destroy/recreate actually complete instead of intermittently
+failing with a "permission denied" error while mounting the replacement
+container's dataset, which the sandboxed context the hookscript inherits at
+post-stop time could otherwise cause.
 
 **Runner pool size:** `MAX_RUNNERS` (default `3`) caps how many
 `gha-runner-*` containers can exist concurrently — checked via `pct list`
@@ -258,3 +274,12 @@ extended:
 See the original repo's README for its own setup instructions if you want to
 compare behavior or fall back to the static-IP/privileged/PAT-based
 approach.
+
+## AI usage
+
+Portions of this project — including bug fixes such as the ephemeral
+container recreate race and the logrotate config — were developed with AI
+assistance. Every change was human reviewed before being committed by
+someone with 20+ years of industry experience, who is accountable for the
+correctness and security of what's in this repo regardless of how it was
+drafted.
