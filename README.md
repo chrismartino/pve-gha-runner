@@ -168,6 +168,9 @@ OWNERREPO=someorg/somerepo \
 ./create-pve-lxc-gha-runner.sh
 ```
 
+An example that installs Docker CE is in
+[`examples/install-docker.sh`](examples/install-docker.sh).
+
 In ephemeral mode this reruns on **every** container recreation (once per
 job), so keep it fast. To use it with the hookscript's self-recreating pool,
 also set `EXTRA_INSTALL_SCRIPT` in the CONFIG block of
