@@ -26,10 +26,13 @@
 #      file) so the container recreates itself after each job. See that
 #      file's header for the setup steps this requires beyond running this
 #      script once.
-#   5. Dependencies: only git/curl/zip are installed by default. Docker,
-#      language runtimes, or anything else your jobs need can be installed
-#      via an optional EXTRA_INSTALL_SCRIPT (see that variable below) instead
-#      of being baked into this script.
+#   5. Dependencies: only git/curl/zip are installed by default, plus
+#      ./bin/installdependencies.sh (the runner tarball's own script for the
+#      OS packages its .NET runtime needs - libicu, liblttng-ust, etc; skipping
+#      it lets run.sh crash on startup on a minimal image). Docker, language
+#      runtimes, or anything else your jobs need can be installed via an
+#      optional EXTRA_INSTALL_SCRIPT (see that variable below) instead of
+#      being baked into this script.
 #
 # Prerequisites:
 #   - A GitHub App must exist (create one under Settings > Developer settings >
@@ -359,6 +362,17 @@ if [ -n "$GITHUB_RUNNER_SHA256" ]; then
 echo "$GITHUB_RUNNER_SHA256  $GITHUB_RUNNER_FILE" | sha256sum -c -
 EOF
 fi
+# ./bin/installdependencies.sh installs the OS packages the runner's .NET
+# runtime needs (libicu, liblttng-ust, etc). Without it, run.sh can crash
+# almost immediately on a minimal image - fatal in ephemeral mode
+# specifically, since ExecStopPost=poweroff (below) fires on ANY exit of
+# run.sh, so a startup crash looks identical to "container comes up and
+# immediately dies" with no obvious error, since the container is gone
+# before anyone can look at it.
+cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
+tar xzf "$GITHUB_RUNNER_FILE"
+./bin/installdependencies.sh
+EOF
 
 if [ "$EPHEMERAL_RUNNER" = "true" ]; then
     # --ephemeral tells GitHub to deregister the runner after exactly one
@@ -371,8 +385,17 @@ if [ "$EPHEMERAL_RUNNER" = "true" ]; then
     # one job and powers itself off with no further host involvement. The
     # post-stop hookscript (see gha_runner_hookscript.sh) is what notices
     # the poweroff and recreates the next container.
+    #
+    # Environment=RUNNER_ALLOW_RUNASROOT=1 matters here specifically: unlike
+    # config.sh above (which gets it prefixed inline on the command), run.sh
+    # is invoked by systemd with a clean environment - without this line it
+    # hits the same root check config.sh did, fails instantly with "Must not
+    # run interactively with sudo" (a misleading message; the actual check
+    # is just "running as root with this var unset"), and
+    # ExecStopPost=poweroff tears the container down before anyone can see
+    # why. This was the actual cause of an early "comes up and immediately
+    # dies" failure during testing.
     cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
-tar xzf "$GITHUB_RUNNER_FILE"
 RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --ephemeral --url "https://github.com/$OWNERREPO" --token "$RUNNER_TOKEN"
 cat > /etc/systemd/system/gha-runner.service <<'UNIT'
 [Unit]
@@ -383,6 +406,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/root/actions-runner
+Environment=RUNNER_ALLOW_RUNASROOT=1
 ExecStart=/root/actions-runner/run.sh
 ExecStopPost=/sbin/poweroff
 Restart=no
@@ -396,7 +420,6 @@ systemctl enable --now gha-runner.service
 EOF
 else
     cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
-tar xzf "$GITHUB_RUNNER_FILE"
 RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --url "https://github.com/$OWNERREPO" --token "$RUNNER_TOKEN"
 ./svc.sh install root
 ./svc.sh start
