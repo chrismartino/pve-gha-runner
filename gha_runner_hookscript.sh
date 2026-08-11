@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Proxmox hookscript for ephemeral GitHub Actions runner containers.
-# Companion to lxc_create_github_actions_runner_app.sh (EPHEMERAL_RUNNER=true).
+# Companion to create-pve-lxc-gha-runner.sh (EPHEMERAL_RUNNER=true).
 #
 # On post-stop, destroys the container that just finished its one job and
 # creates a fresh one to replace it, so there's always a runner available.
@@ -15,19 +15,22 @@
 #
 # 2. Put the main creation script somewhere permanent and fill in CONFIG below
 #    (MAIN_SCRIPT_PATH, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, OWNERREPO).
-#    The private key path must be readable by root only - this hookscript
-#    runs as root, same trust level as running the main script by hand.
-#    EXTRA_INSTALL_SCRIPT is optional - see EXTRA_INSTALL_SCRIPT in the main
-#    script if you want extra dependencies installed in every container.
+#    The private key path must be readable by root only.
 #
 # 3. The FIRST container needs to be created by hand, once, with
 #    EPHEMERAL_RUNNER=true, so it picks up -hookscript pointing at this file
 #    (see HOOKSCRIPT_VOLID in the main script). Every container it recreates
 #    after that inherits the same flag automatically.
 #
+# 4. Install the log rotation config, or recreate.log/hook.log will grow
+#    unbounded:
+#      cp gha-runner-hook.logrotate /etc/logrotate.d/gha-runner-hook
+#
 # How Proxmox invokes this: `<script> <vmid> <phase>` where phase is one of
 # pre-start, post-start, pre-stop, post-stop. Only post-stop does anything
-# here; the others exit immediately.
+# here. This file also re-invokes itself with an internal marker in place of
+# a real phase (see DETACHED_MARKER) to escape the sandboxed context it's
+# originally invoked under - not a Proxmox concept, just an internal handoff.
 #
 set -u
 
@@ -44,21 +47,22 @@ EXTRA_INSTALL_SCRIPT=""
 
 STATE_DIR="/var/lib/gha-runner-hook"
 LAST_RECREATE_FILE="$STATE_DIR/last_recreate"
-MIN_RECREATE_INTERVAL=60  # seconds - flap guard, see header
+MIN_RECREATE_INTERVAL=60  # seconds - flap guard, see below
+
+# Marker used to re-invoke this file via systemd-run instead of a real phase.
+DETACHED_MARKER="__gha_detached_post_stop__"
 
 log() {
     logger -t gha-runner-hook "$*"
     echo "[gha-runner-hook] $*"
 }
 
-# Only act on post-stop; Proxmox calls this script for every phase.
-if [ "$PHASE" != "post-stop" ]; then
+# Only act on post-stop (or our own detached re-invocation).
+if [ "$PHASE" != "post-stop" ] && [ "$PHASE" != "$DETACHED_MARKER" ]; then
     exit 0
 fi
 
-# Only act on containers this setup actually owns. The hookscript is
-# attached per-container via `-hookscript`, so in practice this only fires
-# for our own runners - this check is a second guard in case the same
+# Only act on containers this setup owns - a second guard in case this
 # hookscript ever gets attached to something else by mistake.
 HOSTNAME=$(pct config "$VMID" 2>/dev/null | grep '^hostname:' | awk '{print $2}')
 case "$HOSTNAME" in
@@ -71,23 +75,21 @@ esac
 
 mkdir -p "$STATE_DIR"
 
-# Everything below runs in a detached background job (see the bottom of this
-# file), not inline here. Reason: this hookscript is invoked SYNCHRONOUSLY as
-# part of the stop task itself - `pct` hasn't released its lock on $VMID yet
-# when post-stop fires, it's still unwinding the outer stop operation. Calling
-# `pct destroy` directly from here races that unwind and fails with "container
-# is running" even seconds later, because the outer task is itself blocked
-# waiting on this hookscript to return - a retry loop in the foreground can't
-# out-wait a lock that won't clear until this process exits. Backgrounding the
-# real work and returning immediately lets the outer stop task actually finish
-# and release the lock before anything tries to touch $VMID again.
+# Everything below runs via systemd-run, not a plain background job:
+#   1. This hookscript runs synchronously as part of the stop task itself -
+#      `pct` hasn't released its lock on $VMID yet, so an immediate destroy
+#      fails with "container is running". Backgrounding fixes this part.
+#   2. Backgrounding alone doesn't escape the cgroup/mount-namespace
+#      sandboxing this hookscript inherits from whatever spawned it (likely
+#      pve-container@$VMID.service, mid-teardown at this moment) - that
+#      surfaced as "Permission denied" mounting the replacement container's
+#      dataset. systemd-run launches a genuinely independent unit as a child
+#      of PID 1 instead.
 handle_poststop() {
 
 # --- Flap guard ---
-# If registration is broken (revoked App install, bad key, GitHub API down,
-# etc), the container could crash-loop: start, fail immediately, poweroff,
-# get recreated, fail again. Without this guard that's a tight spin burning
-# GitHub API calls and filling the journal. Refuse to recreate more than
+# If registration is broken (revoked App install, bad key, GitHub API down),
+# the container could crash-loop indefinitely. Refuse to recreate more than
 # once per MIN_RECREATE_INTERVAL and make the failure loud instead.
 NOW=$(date +%s)
 LAST=0
@@ -110,23 +112,17 @@ echo "$NOW" > "$LAST_RECREATE_FILE"
 
 log "CT $VMID finished its job and powered off. Destroying and recreating."
 
-# Short initial wait before the first attempt - addresses a different,
-# already-confirmed issue than the retry loop below: even backgrounded, the
-# outer stop task needs a moment to fully release its PVE-level lock on
-# $VMID, or the first attempt fails with "container is running" rather than
-# a ZFS-level error. Unlike the retry *count* below, this specific wait was
-# validated to matter, so it stays even though extending the retry budget
-# itself didn't help.
+# Even backgrounded, the outer stop task needs a moment to release its
+# PVE-level lock on $VMID, or the first attempt fails with "container is
+# running" instead of a ZFS-level error.
 sleep 2
 
-# Confirmed root cause of "dataset is busy": systemd auto-generates a .mount
-# unit for any path it discovers in the mount table, independent of the
-# container's own lifecycle - pve-container@$VMID.service deactivates
-# cleanly on schedule, but its rootfs's *.mount unit stays active/mounted
-# regardless, and that unit's own hold on the mount is what blocks
-# pct destroy/zfs destroy (no process has an open fd - lsof/fuser confirmed
-# that separately). Fix: stop that unit explicitly before destroying, rather
-# than just retrying and hoping something external clears it.
+# systemd auto-generates a .mount unit for any mounted path, independent of
+# the container's own lifecycle - pve-container@$VMID.service deactivates
+# cleanly, but its rootfs's .mount unit stays active regardless, and that's
+# what blocks pct destroy/zfs destroy with "dataset is busy" (no process has
+# an open fd - lsof/fuser confirmed that separately). Stop it explicitly
+# before destroying.
 ROOTFS_VOLID=$(pct config "$VMID" 2>/dev/null | grep '^rootfs:' | sed -E 's/^rootfs: *([^,]+),.*/\1/')
 MOUNT_UNIT=""
 if [ -n "$ROOTFS_VOLID" ]; then
@@ -136,37 +132,25 @@ if [ -n "$ROOTFS_VOLID" ]; then
     fi
 fi
 
-# Retry budget kept short (~40s) rather than long: testing showed extending
-# it to ~2 minutes didn't change the outcome when the systemd-unit fix below
-# wasn't yet in place - genuinely transient cases resolve fast, and
-# persistent ones (like the mount-unit hold) need the fix above, not more
-# waiting. Persistent failures fall through to the diagnostics below either way.
 DESTROY_OK=false
 DESTROY_ERR=""
 for attempt in $(seq 1 8); do
-    # Stop the mount unit before every attempt, not just after a failure -
-    # systemd can regenerate/re-activate these transient units, so this is
-    # cheap insurance on each pass rather than a one-time fix.
+    # Stop the mount unit before every attempt - systemd can
+    # regenerate/re-activate it, so this is cheap insurance each pass.
     if [ -n "$MOUNT_UNIT" ]; then
         systemctl stop "$MOUNT_UNIT" >/dev/null 2>&1 || true
     fi
-    # Defensive: if this container was ever inspected via `pct mount` during
-    # debugging and never explicitly unmounted, the ZFS dataset stays held
-    # and every destroy attempt fails with "dataset is busy" indefinitely -
-    # not a transient race, a real leftover resource. No-op (and harmless)
-    # if it wasn't mounted.
+    # If this container was ever inspected via `pct mount` during debugging
+    # and never unmounted, the dataset stays held indefinitely. No-op if it
+    # wasn't mounted.
     pct unmount "$VMID" >/dev/null 2>&1 || true
     if DESTROY_ERR=$(pct destroy "$VMID" --purge 2>&1); then
         DESTROY_OK=true
         break
     fi
     log "pct destroy $VMID attempt $attempt/8 failed, retrying in 5s: $DESTROY_ERR"
-    # Lightweight check captured WHILE it's still failing, not after - the
-    # detailed zfs/mount diagnostics below only run once, at the very end,
-    # by which point whatever was holding it may have already cleared and
-    # given a misleadingly clean reading. This catches the host-side systemd
-    # unit for the container specifically, since that's tracked separately
-    # from the container's own "stopped" state that triggered this hook.
+    # Captured while still failing, not after - by the time all attempts are
+    # exhausted, whatever was holding it may have already cleared.
     SYSTEMD_UNITS=$(systemctl list-units --all --no-legend 2>/dev/null | grep -F "$VMID" || true)
     [ -n "$SYSTEMD_UNITS" ] && log "  (attempt $attempt) systemd units mentioning $VMID: $SYSTEMD_UNITS"
     sleep 5
@@ -178,9 +162,6 @@ if [ "$DESTROY_OK" != "true" ]; then
         "bad state)."
     log "Last error: $DESTROY_ERR"
 
-    # Diagnostics: capture what's actually holding the dataset busy, since a
-    # fixed-duration retry not clearing it points at something that won't
-    # resolve just by waiting longer (a leaked mount, not a slow teardown).
     ZFS_DATASET=$(echo "$DESTROY_ERR" | grep -oE "destroy '[^']+'" | sed -E "s/destroy '(.+)'/\1/")
     if [ -n "$ZFS_DATASET" ]; then
         log "Diagnostics for $ZFS_DATASET:"
@@ -223,7 +204,32 @@ fi
 log "Recreation finished (see $STATE_DIR/recreate.log for details)."
 }
 
-( handle_poststop ) >>"$STATE_DIR/hook.log" 2>&1 &
-disown
+if [ "$PHASE" = "$DETACHED_MARKER" ]; then
+    # We are the detached re-invocation launched via systemd-run below - do
+    # the actual work and report its exit status.
+    handle_poststop
+    exit $?
+fi
+
+# Relaunch this file via systemd-run rather than backgrounding it directly:
+# systemd-run starts a genuinely independent transient unit as a child of
+# PID 1, escaping the cgroup/namespace context this hookscript was invoked
+# under (plain `&`/`disown` only detach shell job-control tracking). Passing
+# vmid+marker to re-run the FILE (rather than exporting a function/vars
+# through systemd-run) sidesteps environment-inheritance uncertainty - a
+# fresh transient unit doesn't inherit the caller's shell environment by
+# default, but the CONFIG block above is hardcoded literals read fresh from
+# the file, so a clean re-invocation just works.
+log "post-stop received for CT $VMID, relaunching detached via systemd-run"
+if command -v systemd-run >/dev/null 2>&1; then
+    systemd-run --quiet --collect \
+        --unit="gha-runner-hook-${VMID}-$(date +%s)" \
+        --description="GHA runner post-stop handler for CT $VMID" \
+        "$0" "$VMID" "$DETACHED_MARKER" >>"$STATE_DIR/hook.log" 2>&1
+else
+    log "Warning: systemd-run not found, falling back to plain background job"
+    ( handle_poststop ) >>"$STATE_DIR/hook.log" 2>&1 &
+    disown
+fi
 
 exit 0

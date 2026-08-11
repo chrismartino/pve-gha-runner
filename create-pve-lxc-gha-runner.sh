@@ -6,55 +6,39 @@
 #   https://github.com/oNaiPs/proxmox-scripts/blob/main/lxc_create_github_actions_runner.sh
 #
 # Changes from the original:
-#   1. Network: container gets its address via DHCP instead of a static IP/gateway.
-#   2. Auth: instead of asking for a long-lived GITHUB_TOKEN (PAT), this script
-#      authenticates as a GitHub App. It signs a JWT with the App's private key,
-#      exchanges it for a short-lived installation access token, and uses that
-#      token to request the runner registration token. Nothing long-lived is
-#      stored on disk or passed to the container.
-#   3. Container: created unprivileged (-unprivileged 1) instead of the
-#      original's implicit privileged default, with fuse=1 added alongside
-#      nesting/keyctl so Docker still works unprivileged if you install it
-#      (see EXTRA_INSTALL_SCRIPT below). Requires Proxmox VE 9 (LXC 6 +
-#      cgroup v2) for reliable Docker-in-LXC support at this isolation level
-#      - see the comment above `pct create` below.
-#   4. Ephemeral mode (EPHEMERAL_RUNNER=true): registers with --ephemeral
-#      (GitHub deregisters the runner after one job) and runs it as a
-#      one-shot systemd unit that powers the container off when the job
-#      exits, instead of installing it as a persistent service. Also attaches
-#      a post-stop hookscript (see gha_runner_hookscript.sh, a companion
-#      file) so the container recreates itself after each job. See that
-#      file's header for the setup steps this requires beyond running this
-#      script once.
-#   5. Dependencies: only git/curl/zip are installed by default, plus
-#      ./bin/installdependencies.sh (the runner tarball's own script for the
-#      OS packages its .NET runtime needs - libicu, liblttng-ust, etc; skipping
-#      it lets run.sh crash on startup on a minimal image). Docker, language
-#      runtimes, or anything else your jobs need can be installed via an
-#      optional EXTRA_INSTALL_SCRIPT (see that variable below) instead of
-#      being baked into this script.
+#   1. DHCP instead of a static IP/gateway.
+#   2. Auth via GitHub App instead of a long-lived GITHUB_TOKEN (PAT): signs a
+#      JWT with the App's private key, exchanges it for a short-lived
+#      installation access token, uses that to request the runner
+#      registration token. Nothing long-lived is stored on disk or passed to
+#      the container.
+#   3. Unprivileged container (-unprivileged 1) with fuse=1 alongside
+#      nesting/keyctl so Docker still works if installed via
+#      EXTRA_INSTALL_SCRIPT. Requires Proxmox VE 9 (LXC 6 + cgroup v2).
+#   4. Ephemeral mode (EPHEMERAL_RUNNER=true): registers with --ephemeral and
+#      runs as a one-shot systemd unit that powers the container off after
+#      one job, paired with a post-stop hookscript (gha_runner_hookscript.sh)
+#      that recreates the container. See that file's header for setup.
+#   5. Only git/curl/zip installed by default, plus
+#      ./bin/installdependencies.sh (the runner's own OS-dependency
+#      installer). Anything else your jobs need goes in EXTRA_INSTALL_SCRIPT.
 #
 # Prerequisites:
-#   - A GitHub App must exist (create one under Settings > Developer settings >
-#     GitHub Apps, or your org's equivalent).
-#   - The App needs Repository permissions: "Administration: Read and write"
-#     (this is what grants access to the runner registration-token endpoint).
-#     For organization-level runners instead of repo-level, give the App the
-#     Organization permission "Self-hosted runners: Read and write" instead,
-#     and adjust the registration-token URL near the bottom of this script
-#     from /repos/$OWNERREPO/... to /orgs/$ORG/... (see comment there).
-#   - The App must be installed on the target repo (or org).
-#   - You need: the App ID, and the App's private key (.pem) downloaded locally.
-#   - `openssl` must be available on the Proxmox host (it almost always is).
+#   - A GitHub App with Repository permission "Administration: Read and
+#     write" (grants access to the runner registration-token endpoint). For
+#     org-level runners instead of repo-level, use the Organization
+#     permission "Self-hosted runners: Read and write" instead and swap the
+#     registration-token URL below from /repos/$OWNERREPO/... to /orgs/$ORG/...
+#   - The App installed on the target repo (or org).
+#   - The App ID and its private key (.pem) downloaded locally.
+#   - `openssl` available on the Proxmox host.
 #
 set -e
 
 # Variables
-# Ubuntu 24.04 LTS: matches what GitHub's own ubuntu-latest hosted runners use,
-# and is supported into 2029 (the original script's 23.04 template is EOL and
-# no longer mirrored). This filename can shift with point releases - if the
-# download below 404s, run `pveam update && pveam available | grep ubuntu-24.04`
-# on the Proxmox host to find the current one.
+# Ubuntu 24.04 LTS - matches GitHub's ubuntu-latest, supported into 2029.
+# Filename can shift with point releases; if the download 404s, run
+# `pveam update && pveam available | grep ubuntu-24.04` to find the current one.
 TEMPL_URL="http://download.proxmox.com/images/system/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
 PCTSIZE="20G"
 PCT_ARCH="amd64"
@@ -62,40 +46,27 @@ PCT_CORES="4"
 PCT_MEMORY="4096"
 PCT_SWAP="4096"
 PCT_STORAGE="local-zfs"
-# Templates (vztmpl) and container rootfs (rootdir) are different content
-# types in Proxmox. A ZFS pool's default "local-zfs" storage is typically
-# scoped to rootdir/images only - it will NOT accept `pveam download`, which
-# needs vztmpl support. Templates go on TEMPL_STORAGE ("local", the
-# directory-backed storage that ships with every install and does support
-# vztmpl); the container itself is provisioned on PCT_STORAGE. Check
-# `pvesm status` if unsure which of your storages has vztmpl in its content
-# list.
+# vztmpl (templates) and rootdir (container disks) are different Proxmox
+# storage content types - a ZFS pool's "local-zfs" storage typically only
+# supports rootdir/images, not vztmpl. Templates go on TEMPL_STORAGE
+# ("local"); the container itself goes on PCT_STORAGE. Check `pvesm status`
+# if unsure which storage has vztmpl.
 TEMPL_STORAGE="local"
-# Ephemeral mode: registers the runner with --ephemeral and runs it as a
-# one-shot systemd unit (see the runner-install section below) instead of a
-# persistent service. Set via env var so the companion hookscript can invoke
-# this script non-interactively with EPHEMERAL_RUNNER=true.
+# Set via env var so the hookscript can invoke this non-interactively.
 EPHEMERAL_RUNNER="${EPHEMERAL_RUNNER:-false}"
-# Where the post-stop hookscript lives, in Proxmox volid form. Only used when
-# EPHEMERAL_RUNNER=true. Like TEMPL_STORAGE, this needs a storage with the
-# "snippets" content type enabled - "local-zfs" won't have it by default,
-# "local" (directory storage) does.
+# Proxmox volid of the post-stop hookscript. Needs a storage with the
+# "snippets" content type - "local-zfs" won't have it, "local" does.
 HOOKSCRIPT_VOLID="local:snippets/gha_runner_hookscript.sh"
 # Optional local script (on the Proxmox host) to install extra dependencies
-# inside the container beyond git/curl/zip - e.g. Docker, language runtimes,
-# or CLIs your jobs need. Pushed in and run once, before the runner
-# registers. Runs on every container creation, so in ephemeral mode it
-# reruns per job - keep it fast. Unset by default.
+# inside the container beyond git/curl/zip. Pushed in and run once per
+# container creation - keep it fast, since ephemeral mode reruns it per job.
 EXTRA_INSTALL_SCRIPT="${EXTRA_INSTALL_SCRIPT:-}"
-# Max concurrent gha-runner-* containers. Checked against `pct list` before
-# any work happens below - applies whether this script was invoked by hand
-# or by the post-stop hookscript recreating a finished runner, since both
-# paths go through this same check rather than duplicating the limit in two
-# places. Raise if you want a bigger pool; the hookscript needs no changes
-# either way since it always requests exactly one replacement per job.
+# Max concurrent gha-runner-* containers, checked via `pct list` before any
+# work starts. Applies to both manual and hookscript-triggered invocations.
+# The hookscript always requests exactly one replacement per job, so this is
+# a ceiling/safety-net, not something that actively tops the pool back up.
 MAX_RUNNERS="${MAX_RUNNERS:-3}"
 
-# log function prints text in yellow
 log() {
     local text="$1"
     echo -e "\033[33m$text\033[0m"
@@ -108,13 +79,9 @@ if [ "$RUNNING_RUNNERS" -ge "$MAX_RUNNERS" ]; then
 fi
 
 # --- Resolve the latest runner release + its published checksum ---
-#
-# GitHub enforces a minimum runner version at registration time (v2.329.0 as
-# of March 2026), and this script previously pinned an old version, which is
-# exactly what let it go stale. Resolving "latest" at runtime avoids that.
-# The release asset filename includes the version (e.g.
-# actions-runner-linux-x64-2.336.0.tar.gz) - there is no unversioned alias
-# that resolves, so the version has to be looked up first.
+# The asset filename includes the version (e.g.
+# actions-runner-linux-x64-2.336.0.tar.gz), so the version has to be looked
+# up first - there's no unversioned alias that resolves.
 log "-- Resolving latest actions/runner release"
 RUNNER_RELEASE_JSON=$(curl -fsS -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/actions/runner/releases/latest")
@@ -196,10 +163,9 @@ if [ -z "$GITHUB_APP_INSTALLATION_ID" ]; then
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         "https://api.github.com/repos/$OWNERREPO/installation")
-    # `|| true` matters here: under `set -e`, VAR=$(cmd | grep ...) aborts the
-    # whole script with NO error message if grep finds nothing, because the
-    # assignment's exit status follows the last command in the pipeline. The
-    # explicit checks below only run because of this.
+    # `|| true`: under `set -e`, VAR=$(cmd | grep ...) aborts silently if
+    # grep finds nothing, since the assignment's exit status follows the
+    # pipeline's last command. The check below only runs because of this.
     GITHUB_APP_INSTALLATION_ID=$(echo "$INSTALL_RES" | grep -o '"id": *[0-9]*' | head -1 | grep -o '[0-9]*' || true)
 
     if [ -z "$GITHUB_APP_INSTALLATION_ID" ]; then
@@ -226,14 +192,10 @@ if [ -z "$INSTALLATION_TOKEN" ]; then
     exit 1
 fi
 
-# Get filename from the template URL
 TEMPL_FILE=$(basename "$TEMPL_URL")
-
-# Get the next available ID from Proxmox
 PCTID=$(pvesh get /cluster/nextid)
 
-# Download Ubuntu template (prefer pveam: it checksum-verifies against
-# Proxmox's published manifest, which a raw curl download does not)
+# pveam checksum-verifies against Proxmox's manifest; a raw curl download doesn't.
 log "-- Downloading $TEMPL_FILE template..."
 if command -v pveam >/dev/null 2>&1 && pveam update >/dev/null 2>&1 \
     && pveam available --section system 2>/dev/null | grep -q "$TEMPL_FILE"; then
@@ -246,30 +208,11 @@ else
     TEMPL_FILE_PATH="$TEMPL_FILE"
 fi
 
-# Create LXC container (DHCP instead of static IP/gateway)
-# Unprivileged (PVE 9): LXC 6 + cgroup v2 on PVE 9 make Docker-in-LXC work
-# reliably unprivileged, avoiding the direct root-equivalent host-escape
-# surface that privileged + nesting/keyctl carries. `fuse=1` is added
-# alongside nesting/keyctl so Docker can fall back to fuse-overlayfs if the
-# kernel overlay driver isn't usable unprivileged in your environment -
-# without it, Docker's storage driver setup can fail inside unprivileged
-# containers depending on kernel/config specifics.
-#
-# ZFS storage notes:
-#   - Provisioned on $PCT_STORAGE (local-zfs), which gives the container its
-#     own ZFS dataset for rootfs. Docker's overlay2 driver runs fine on top
-#     of that (OpenZFS has supported the d_type readdir flag overlayfs
-#     requires since 0.8.x, which any current PVE 9 pool has), so no Docker
-#     storage-driver override is needed.
-#   - Do NOT point Docker's own storage driver at zfs from inside the
-#     container (`--storage-driver zfs`) - that expects direct access to a
-#     ZFS pool/kernel module, which isn't available or safe to hand to an
-#     unprivileged container. Leave Docker on its overlay2 default.
-#   - $PCT_SWAP (a swapfile Proxmox creates inside the container) works fine
-#     on a ZFS-backed dataset, but a swapfile sitting on top of ZFS's own
-#     ARC caching is somewhat redundant memory pressure. Harmless for a CI
-#     runner's workload, just worth knowing if you ever see memory pressure
-#     that doesn't match what you'd expect from PCT_MEMORY alone.
+# ZFS notes: Docker's overlay2 driver works fine on a ZFS-backed rootfs
+# (OpenZFS has supported the d_type flag overlayfs needs since 0.8.x). Don't
+# point Docker's own storage driver at zfs from inside the container - that
+# needs direct pool/kernel-module access an unprivileged container shouldn't
+# have. Leave Docker on overlay2.
 log "-- Creating LXC container with ID:$PCTID"
 PCT_CREATE_ARGS=(
     -arch $PCT_ARCH
@@ -295,25 +238,19 @@ if [ "$EPHEMERAL_RUNNER" = "true" ]; then
 fi
 pct create "$PCTID" "$TEMPL_FILE_PATH" "${PCT_CREATE_ARGS[@]}"
 
-# Resize the container
 log "-- Resizing container to $PCTSIZE"
 pct resize "$PCTID" rootfs $PCTSIZE
 
-# Start the container & run updates inside it
 log "-- Starting container"
 pct start "$PCTID"
 sleep 10
 
 log "-- Running updates"
-# passwd -l (lock) disables password auth outright. The original script used
-# `passwd -d` (delete), which leaves an EMPTY password - some PAM configs
-# treat that as "no password required" rather than "login disabled," which
-# is a real foothold if anything inside the container ever exposes a login
-# prompt (sshd, getty, etc). Root access for you still works via `pct exec`/
-# `pct enter` regardless, since that goes through the Proxmox host, not PAM.
+# passwd -l (lock) instead of -d (delete): an empty password can mean "no
+# password required" under some PAM configs. Your own access via pct exec/
+# pct enter is unaffected, since that goes through the host, not PAM.
 pct exec "$PCTID" -- bash -c "apt update -y && apt install -y git curl zip && passwd -l root"
 
-# Run the user-supplied extra dependency install script, if any
 if [ -n "$EXTRA_INSTALL_SCRIPT" ]; then
     log "-- Running EXTRA_INSTALL_SCRIPT: $EXTRA_INSTALL_SCRIPT"
     pct push "$PCTID" "$EXTRA_INSTALL_SCRIPT" /root/extra-install.sh --perms 700
@@ -321,10 +258,9 @@ if [ -n "$EXTRA_INSTALL_SCRIPT" ]; then
     pct exec "$PCTID" -- rm -f /root/extra-install.sh
 fi
 
-# Get runner installation token (using the App's installation token instead of a PAT)
 log "-- Getting runner installation token"
-# For an org-level runner instead of a repo-level one, swap this URL for:
-#   https://api.github.com/orgs/$ORG/actions/runners/registration-token
+# Org-level runner instead of repo-level: swap for
+# https://api.github.com/orgs/$ORG/actions/runners/registration-token
 RES=$(curl -fsS -L \
     -X POST \
     -H "Accept: application/vnd.github+json" \
@@ -339,22 +275,19 @@ if [ -z "$RUNNER_TOKEN" ]; then
     exit 1
 fi
 
-# Install and start the runner.
-#
-# NOTE on secret exposure: RUNNER_TOKEN is written to a script that's pushed
-# into the container and executed there, rather than being inlined into a
-# `pct exec ... bash -c "...$RUNNER_TOKEN..."` command - that form puts the
-# token in that process's argv, visible via `ps` on the Proxmox HOST for the
-# life of the call. This approach avoids that host-side exposure. It can't
-# eliminate the exposure entirely: `config.sh` only accepts the token as a
-# CLI flag (no stdin/env support), so it will still appear briefly in the
-# container's own process list while config.sh runs - that's a limitation of
-# the runner binary itself, not something a wrapper script can fix.
+# RUNNER_TOKEN is written into a script pushed into the container and run
+# there, rather than inlined into `pct exec ... bash -c "...$RUNNER_TOKEN..."`,
+# which would expose it in that process's argv via `ps` on the host.
 RUNNER_SETUP_SCRIPT=$(mktemp)
 cat > "$RUNNER_SETUP_SCRIPT" <<EOF
 #!/usr/bin/env bash
 set -e
-mkdir -p actions-runner && cd actions-runner
+# Absolute path, not relative + cd: pct exec without --cwd starts the
+# command using the calling host process's cwd if that path also exists in
+# the container ("/" always does) - a relative "actions-runner" here can
+# silently land at /actions-runner instead of /root/actions-runner
+# depending on what invoked this script.
+mkdir -p /root/actions-runner && cd /root/actions-runner
 curl -fsS -o "$GITHUB_RUNNER_FILE" -L "$GITHUB_RUNNER_URL"
 EOF
 if [ -n "$GITHUB_RUNNER_SHA256" ]; then
@@ -362,41 +295,24 @@ if [ -n "$GITHUB_RUNNER_SHA256" ]; then
 echo "$GITHUB_RUNNER_SHA256  $GITHUB_RUNNER_FILE" | sha256sum -c -
 EOF
 fi
-# ./bin/installdependencies.sh installs the OS packages the runner's .NET
-# runtime needs (libicu, liblttng-ust, etc). Without it, run.sh can crash
-# almost immediately on a minimal image - fatal in ephemeral mode
-# specifically, since ExecStopPost=poweroff (below) fires on ANY exit of
-# run.sh, so a startup crash looks identical to "container comes up and
-# immediately dies" with no obvious error, since the container is gone
-# before anyone can look at it.
 cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
 tar xzf "$GITHUB_RUNNER_FILE"
+if [ ! -x run.sh ]; then
+    echo "FATAL: run.sh missing or not executable after tar extraction. Contents of actions-runner/:" >&2
+    ls -la >&2
+    exit 1
+fi
 ./bin/installdependencies.sh
 EOF
 
 if [ "$EPHEMERAL_RUNNER" = "true" ]; then
-    # --ephemeral tells GitHub to deregister the runner after exactly one
-    # job. That alone doesn't stop the *process* from idling afterward, so
-    # it's paired with a one-shot systemd unit (Type=simple, Restart=no,
-    # ExecStopPost=poweroff) rather than the persistent service svc.sh
-    # installs. `systemctl start` on a Type=simple unit returns as soon as
-    # the process forks, not when it finishes - so this call (and the whole
-    # provisioning script) returns quickly, and the container then runs its
-    # one job and powers itself off with no further host involvement. The
-    # post-stop hookscript (see gha_runner_hookscript.sh) is what notices
-    # the poweroff and recreates the next container.
-    #
-    # Environment=RUNNER_ALLOW_RUNASROOT=1 matters here specifically: unlike
-    # config.sh above (which gets it prefixed inline on the command), run.sh
-    # is invoked by systemd with a clean environment - without this line it
-    # hits the same root check config.sh did, fails instantly with "Must not
-    # run interactively with sudo" (a misleading message; the actual check
-    # is just "running as root with this var unset"), and
-    # ExecStopPost=poweroff tears the container down before anyone can see
-    # why. This was the actual cause of an early "comes up and immediately
-    # dies" failure during testing.
     cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
-RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --ephemeral --url "https://github.com/$OWNERREPO" --token "$RUNNER_TOKEN"
+RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --ephemeral --replace --url "https://github.com/$OWNERREPO" --token "$RUNNER_TOKEN"
+if [ ! -x run.sh ]; then
+    echo "FATAL: run.sh missing or not executable after config.sh. Contents of actions-runner/:" >&2
+    ls -la >&2
+    exit 1
+fi
 cat > /etc/systemd/system/gha-runner.service <<'UNIT'
 [Unit]
 Description=GitHub Actions Ephemeral Runner
@@ -417,10 +333,18 @@ WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
 systemctl enable --now gha-runner.service
+# systemctl's exit code doesn't confirm run.sh actually launched - for
+# Type=simple it returns once the process forks, not once exec() succeeds.
+sleep 2
+if ! systemctl is-active --quiet gha-runner.service; then
+    echo "FATAL: gha-runner.service is not active 2s after enable --now. Status:" >&2
+    systemctl status gha-runner.service --no-pager >&2 || true
+    exit 1
+fi
 EOF
 else
     cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
-RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --url "https://github.com/$OWNERREPO" --token "$RUNNER_TOKEN"
+RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --replace --url "https://github.com/$OWNERREPO" --token "$RUNNER_TOKEN"
 ./svc.sh install root
 ./svc.sh start
 EOF
@@ -430,14 +354,12 @@ chmod 700 "$RUNNER_SETUP_SCRIPT"
 log "-- Installing runner"
 pct push "$PCTID" "$RUNNER_SETUP_SCRIPT" /root/setup-runner.sh --perms 700
 pct exec "$PCTID" -- /root/setup-runner.sh
-# In ephemeral mode the container can power itself off before this next call
-# runs (or shortly after), so a failure here is expected and harmless -
-# there's nothing left to clean up on a container that's already gone.
+# Ephemeral containers can power off before/during this call - harmless.
 pct exec "$PCTID" -- rm -f /root/setup-runner.sh || true
 rm -f "$RUNNER_SETUP_SCRIPT"
 
-# Delete the template only if we fetched it ourselves outside pveam's cache
-# (pveam-managed copies are checksum-tracked and worth keeping for reuse)
+# Only clean up templates we fetched ourselves - pveam-managed ones are
+# checksum-tracked and worth keeping for reuse.
 if [ "$TEMPL_FILE_PATH" = "$TEMPL_FILE" ]; then
     rm -f "$TEMPL_FILE"
 fi
