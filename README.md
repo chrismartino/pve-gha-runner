@@ -13,7 +13,7 @@ Adapted and enhanced from
 
 | File | Purpose |
 |---|---|
-| `create-pve-lxc-gha-runner.sh` | Creates an unprivileged Ubuntu 24.04 LXC container, installs Docker, and registers it as a GitHub Actions runner. Run by hand, or invoked automatically by the hookscript. |
+| `create-pve-lxc-gha-runner.sh` | Creates an unprivileged Ubuntu 24.04 LXC container and registers it as a GitHub Actions runner (Docker and other extra dependencies are optional — see [Installing extra dependencies](#installing-extra-dependencies)). Run by hand, or invoked automatically by the hookscript. |
 | `gha_runner_hookscript.sh` | Proxmox post-stop hookscript. Only used in ephemeral mode: when a runner container powers off after finishing its one job, this destroys it and creates its replacement. |
 
 ## Prerequisites
@@ -152,6 +152,27 @@ reason via `logger` (tag `gha-runner-hook`, also mirrored to
 underlying issue, then rerun the main script by hand with
 `EPHEMERAL_RUNNER=true` to resume.
 
+## Installing extra dependencies
+
+The container only gets `git`, `curl`, and `zip` by default — **Docker is
+not installed automatically**. For Docker, language runtimes, or any other
+CLIs your jobs need, point `EXTRA_INSTALL_SCRIPT` at a script on the Proxmox
+host — it's pushed into the container and run once, before the runner
+registers:
+
+```sh
+EXTRA_INSTALL_SCRIPT=/root/my-extra-deps.sh \
+GITHUB_APP_ID=123456 \
+GITHUB_APP_PRIVATE_KEY_PATH=/root/my-app.private-key.pem \
+OWNERREPO=someorg/somerepo \
+./create-pve-lxc-gha-runner.sh
+```
+
+In ephemeral mode this reruns on **every** container recreation (once per
+job), so keep it fast. To use it with the hookscript's self-recreating pool,
+also set `EXTRA_INSTALL_SCRIPT` in the CONFIG block of
+`gha_runner_hookscript.sh`.
+
 ## Organization-level runners
 
 By default the script requests a **repo-level** registration token. For an
@@ -189,6 +210,7 @@ Variables at the top of `create-pve-lxc-gha-runner.sh`:
 | `TEMPL_STORAGE` | `local` | Where the Ubuntu template is downloaded (must support `vztmpl`; `local-zfs` usually doesn't). |
 | `MAX_RUNNERS` | `3` | Max concurrent `gha-runner-*` containers. Env var. |
 | `EPHEMERAL_RUNNER` | `false` | Set `true` to use ephemeral mode. Env var. |
+| `EXTRA_INSTALL_SCRIPT` | (unset) | Path to a local script to run inside the container for extra dependencies. Env var. See [Installing extra dependencies](#installing-extra-dependencies). |
 | `HOOKSCRIPT_VOLID` | `local:snippets/gha_runner_hookscript.sh` | Proxmox volid of the hookscript; only used when `EPHEMERAL_RUNNER=true`. |
 
 Runner version is **not** pinned — the script resolves and downloads the

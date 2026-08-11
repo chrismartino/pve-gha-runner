@@ -17,6 +17,8 @@
 #    (MAIN_SCRIPT_PATH, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, OWNERREPO).
 #    The private key path must be readable by root only - this hookscript
 #    runs as root, same trust level as running the main script by hand.
+#    EXTRA_INSTALL_SCRIPT is optional - see EXTRA_INSTALL_SCRIPT in the main
+#    script if you want extra dependencies installed in every container.
 #
 # 3. The FIRST container needs to be created by hand, once, with
 #    EPHEMERAL_RUNNER=true, so it picks up -hookscript pointing at this file
@@ -37,6 +39,7 @@ MAIN_SCRIPT_PATH="/root/lxc_create_github_actions_runner_app.sh"
 GITHUB_APP_ID=""
 GITHUB_APP_PRIVATE_KEY_PATH=""
 OWNERREPO=""
+EXTRA_INSTALL_SCRIPT=""
 # --- end config ---
 
 STATE_DIR="/var/lib/gha-runner-hook"
@@ -110,6 +113,7 @@ export EPHEMERAL_RUNNER=true
 export GITHUB_APP_ID
 export GITHUB_APP_PRIVATE_KEY_PATH
 export OWNERREPO
+[ -n "$EXTRA_INSTALL_SCRIPT" ] && export EXTRA_INSTALL_SCRIPT
 
 # Run in the background: Proxmox expects hookscripts to return promptly, and
 # while container creation itself is quick, we don't want a slow step (e.g.
