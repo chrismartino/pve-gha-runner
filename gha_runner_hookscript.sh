@@ -71,6 +71,18 @@ esac
 
 mkdir -p "$STATE_DIR"
 
+# Everything below runs in a detached background job (see the bottom of this
+# file), not inline here. Reason: this hookscript is invoked SYNCHRONOUSLY as
+# part of the stop task itself - `pct` hasn't released its lock on $VMID yet
+# when post-stop fires, it's still unwinding the outer stop operation. Calling
+# `pct destroy` directly from here races that unwind and fails with "container
+# is running" even seconds later, because the outer task is itself blocked
+# waiting on this hookscript to return - a retry loop in the foreground can't
+# out-wait a lock that won't clear until this process exits. Backgrounding the
+# real work and returning immediately lets the outer stop task actually finish
+# and release the lock before anything tries to touch $VMID again.
+handle_poststop() {
+
 # --- Flap guard ---
 # If registration is broken (revoked App install, bad key, GitHub API down,
 # etc), the container could crash-loop: start, fail immediately, poweroff,
@@ -91,40 +103,41 @@ if [ "$ELAPSED" -lt "$MIN_RECREATE_INTERVAL" ]; then
     if ! FLAP_DESTROY_ERR=$(pct destroy "$VMID" --purge 2>&1); then
         log "Additionally, pct destroy $VMID failed: $FLAP_DESTROY_ERR"
     fi
-    exit 0
+    return 0
 fi
 
 echo "$NOW" > "$LAST_RECREATE_FILE"
 
 log "CT $VMID finished its job and powered off. Destroying and recreating."
 
-# Retry with backoff: post-stop can fire while the LXC/ZFS teardown from the
-# stop itself is still finishing its unmount, so an immediate `pct destroy`
-# can collide with it and fail transiently. A few short retries absorb that
-# race instead of giving up on the first attempt.
+# A short initial wait before the first attempt, on top of already being
+# backgrounded - the outer stop task is usually done releasing its lock
+# within a second or two of this hookscript being invoked.
+sleep 2
+
 DESTROY_OK=false
 DESTROY_ERR=""
-for attempt in 1 2 3 4 5; do
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
     if DESTROY_ERR=$(pct destroy "$VMID" --purge 2>&1); then
         DESTROY_OK=true
         break
     fi
-    log "pct destroy $VMID attempt $attempt/5 failed, retrying in 3s: $DESTROY_ERR"
+    log "pct destroy $VMID attempt $attempt/10 failed, retrying in 3s: $DESTROY_ERR"
     sleep 3
 done
 
 if [ "$DESTROY_OK" != "true" ]; then
-    log "ERROR: pct destroy $VMID failed after 5 attempts. Not attempting to create a" \
+    log "ERROR: pct destroy $VMID failed after 10 attempts. Not attempting to create a" \
         "replacement until this is resolved (leftover container may be in a bad state)."
     log "Last error: $DESTROY_ERR"
-    exit 1
+    return 1
 fi
 
 if [ ! -x "$MAIN_SCRIPT_PATH" ]; then
     log "ERROR: $MAIN_SCRIPT_PATH not found or not executable. CT $VMID was destroyed" \
         "but no replacement was created. Fix MAIN_SCRIPT_PATH in this hookscript and" \
         "either rerun it by hand or wait for the next trigger."
-    exit 1
+    return 1
 fi
 
 export EPHEMERAL_RUNNER=true
@@ -133,11 +146,16 @@ export GITHUB_APP_PRIVATE_KEY_PATH
 export OWNERREPO
 [ -n "$EXTRA_INSTALL_SCRIPT" ] && export EXTRA_INSTALL_SCRIPT
 
-# Run in the background: Proxmox expects hookscripts to return promptly, and
-# while container creation itself is quick, we don't want a slow step (e.g.
-# a stalled download) to make Proxmox think the hook itself hung.
-nohup "$MAIN_SCRIPT_PATH" >>"$STATE_DIR/recreate.log" 2>&1 &
+log "Recreating..."
+if ! "$MAIN_SCRIPT_PATH" >>"$STATE_DIR/recreate.log" 2>&1; then
+    log "ERROR: $MAIN_SCRIPT_PATH exited non-zero. Check $STATE_DIR/recreate.log."
+    return 1
+fi
+
+log "Recreation finished (see $STATE_DIR/recreate.log for details)."
+}
+
+( handle_poststop ) >>"$STATE_DIR/hook.log" 2>&1 &
 disown
 
-log "Recreation started in the background (see $STATE_DIR/recreate.log)."
 exit 0
