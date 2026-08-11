@@ -14,10 +14,9 @@
 #      stored on disk or passed to the container.
 #   3. Container: created unprivileged (-unprivileged 1) instead of the
 #      original's implicit privileged default, with fuse=1 added alongside
-#      nesting/keyctl so Docker still works unprivileged if you install it
-#      (see EXTRA_INSTALL_SCRIPT below). Requires Proxmox VE 9 (LXC 6 +
-#      cgroup v2) for reliable Docker-in-LXC support at this isolation level
-#      - see the comment above `pct create` below.
+#      nesting/keyctl so Docker still works unprivileged. Requires Proxmox VE
+#      9 (LXC 6 + cgroup v2) for reliable Docker-in-LXC support at this
+#      isolation level - see the comment above `pct create` below.
 #   4. Ephemeral mode (EPHEMERAL_RUNNER=true): registers with --ephemeral
 #      (GitHub deregisters the runner after one job) and runs it as a
 #      one-shot systemd unit that powers the container off when the job
@@ -26,10 +25,6 @@
 #      file) so the container recreates itself after each job. See that
 #      file's header for the setup steps this requires beyond running this
 #      script once.
-#   5. Dependencies: only git/curl/zip are installed by default. Docker,
-#      language runtimes, or anything else your jobs need can be installed
-#      via an optional EXTRA_INSTALL_SCRIPT (see that variable below) instead
-#      of being baked into this script.
 #
 # Prerequisites:
 #   - A GitHub App must exist (create one under Settings > Developer settings >
@@ -78,12 +73,6 @@ EPHEMERAL_RUNNER="${EPHEMERAL_RUNNER:-false}"
 # "snippets" content type enabled - "local-zfs" won't have it by default,
 # "local" (directory storage) does.
 HOOKSCRIPT_VOLID="local:snippets/gha_runner_hookscript.sh"
-# Optional local script (on the Proxmox host) to install extra dependencies
-# inside the container beyond git/curl/zip - e.g. Docker, language runtimes,
-# or CLIs your jobs need. Pushed in and run once, before the runner
-# registers. Runs on every container creation, so in ephemeral mode it
-# reruns per job - keep it fast. Unset by default.
-EXTRA_INSTALL_SCRIPT="${EXTRA_INSTALL_SCRIPT:-}"
 # Max concurrent gha-runner-* containers. Checked against `pct list` before
 # any work happens below - applies whether this script was invoked by hand
 # or by the post-stop hookscript recreating a finished runner, since both
@@ -151,11 +140,6 @@ fi
 if [ -z "$OWNERREPO" ]; then
     read -r -p "Enter github owner/repo: " OWNERREPO
     echo
-fi
-
-if [ -n "$EXTRA_INSTALL_SCRIPT" ] && [ ! -f "$EXTRA_INSTALL_SCRIPT" ]; then
-    echo "EXTRA_INSTALL_SCRIPT set but not found at: $EXTRA_INSTALL_SCRIPT" >&2
-    exit 1
 fi
 
 # --- Helpers for JWT creation ---
@@ -310,13 +294,9 @@ log "-- Running updates"
 # `pct enter` regardless, since that goes through the Proxmox host, not PAM.
 pct exec "$PCTID" -- bash -c "apt update -y && apt install -y git curl zip && passwd -l root"
 
-# Run the user-supplied extra dependency install script, if any
-if [ -n "$EXTRA_INSTALL_SCRIPT" ]; then
-    log "-- Running EXTRA_INSTALL_SCRIPT: $EXTRA_INSTALL_SCRIPT"
-    pct push "$PCTID" "$EXTRA_INSTALL_SCRIPT" /root/extra-install.sh --perms 700
-    pct exec "$PCTID" -- /root/extra-install.sh
-    pct exec "$PCTID" -- rm -f /root/extra-install.sh
-fi
+# Install Docker inside the container
+log "-- Installing docker"
+pct exec "$PCTID" -- bash -c "curl -qfsSL https://get.docker.com | sh"
 
 # Get runner installation token (using the App's installation token instead of a PAT)
 log "-- Getting runner installation token"
@@ -359,6 +339,17 @@ if [ -n "$GITHUB_RUNNER_SHA256" ]; then
 echo "$GITHUB_RUNNER_SHA256  $GITHUB_RUNNER_FILE" | sha256sum -c -
 EOF
 fi
+# ./bin/installdependencies.sh installs the OS packages the runner's .NET
+# runtime needs (libicu, liblttng-ust, etc). Without it, run.sh can crash
+# almost immediately on a minimal image - fatal in ephemeral mode
+# specifically, since ExecStopPost=poweroff (below) fires on ANY exit of
+# run.sh, so a startup crash looks identical to "container comes up and
+# immediately dies" with no obvious error, since the container is gone
+# before anyone can look at it.
+cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
+tar xzf "$GITHUB_RUNNER_FILE"
+./bin/installdependencies.sh
+EOF
 
 if [ "$EPHEMERAL_RUNNER" = "true" ]; then
     # --ephemeral tells GitHub to deregister the runner after exactly one
@@ -372,7 +363,6 @@ if [ "$EPHEMERAL_RUNNER" = "true" ]; then
     # post-stop hookscript (see gha_runner_hookscript.sh) is what notices
     # the poweroff and recreates the next container.
     cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
-tar xzf "$GITHUB_RUNNER_FILE"
 RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --ephemeral --url "https://github.com/$OWNERREPO" --token "$RUNNER_TOKEN"
 cat > /etc/systemd/system/gha-runner.service <<'UNIT'
 [Unit]
@@ -383,6 +373,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/root/actions-runner
+Environment=RUNNER_ALLOW_RUNASROOT=1
 ExecStart=/root/actions-runner/run.sh
 ExecStopPost=/sbin/poweroff
 Restart=no
@@ -396,7 +387,6 @@ systemctl enable --now gha-runner.service
 EOF
 else
     cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
-tar xzf "$GITHUB_RUNNER_FILE"
 RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --url "https://github.com/$OWNERREPO" --token "$RUNNER_TOKEN"
 ./svc.sh install root
 ./svc.sh start
