@@ -1,0 +1,19 @@
+# logrotate config for the GHA runner hookscript's logs.
+# Install: cp gha-runner-hook.logrotate /etc/logrotate.d/gha-runner-hook
+#
+# Rotates weekly OR at 10M, whichever comes first - size matters more than
+# a fixed schedule here since writes are tied to job frequency, not a clock.
+# No copytruncate needed: each write is a short-lived open/append/close (a
+# fresh bash redirection per hookscript invocation), not a long-running
+# process holding the file descriptor open across rotation.
+/var/lib/gha-runner-hook/recreate.log
+/var/lib/gha-runner-hook/hook.log
+{
+    weekly
+    maxsize 10M
+    rotate 4
+    compress
+    missingok
+    notifempty
+    create 0600 root root
+}
