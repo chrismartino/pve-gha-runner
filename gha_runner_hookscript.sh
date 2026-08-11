@@ -88,7 +88,9 @@ if [ "$ELAPSED" -lt "$MIN_RECREATE_INTERVAL" ]; then
     log "Check: App installation still valid? Private key readable? GitHub API reachable?"
     log "Destroying CT $VMID but NOT creating a replacement. Fix the underlying issue, then run"
     log "$MAIN_SCRIPT_PATH by hand (with EPHEMERAL_RUNNER=true) to resume."
-    pct destroy "$VMID" --purge >/dev/null 2>&1
+    if ! FLAP_DESTROY_ERR=$(pct destroy "$VMID" --purge 2>&1); then
+        log "Additionally, pct destroy $VMID failed: $FLAP_DESTROY_ERR"
+    fi
     exit 0
 fi
 
@@ -96,9 +98,25 @@ echo "$NOW" > "$LAST_RECREATE_FILE"
 
 log "CT $VMID finished its job and powered off. Destroying and recreating."
 
-if ! pct destroy "$VMID" --purge; then
-    log "ERROR: pct destroy $VMID failed. Not attempting to create a replacement" \
-        "until this is resolved (leftover container may be in a bad state)."
+# Retry with backoff: post-stop can fire while the LXC/ZFS teardown from the
+# stop itself is still finishing its unmount, so an immediate `pct destroy`
+# can collide with it and fail transiently. A few short retries absorb that
+# race instead of giving up on the first attempt.
+DESTROY_OK=false
+DESTROY_ERR=""
+for attempt in 1 2 3 4 5; do
+    if DESTROY_ERR=$(pct destroy "$VMID" --purge 2>&1); then
+        DESTROY_OK=true
+        break
+    fi
+    log "pct destroy $VMID attempt $attempt/5 failed, retrying in 3s: $DESTROY_ERR"
+    sleep 3
+done
+
+if [ "$DESTROY_OK" != "true" ]; then
+    log "ERROR: pct destroy $VMID failed after 5 attempts. Not attempting to create a" \
+        "replacement until this is resolved (leftover container may be in a bad state)."
+    log "Last error: $DESTROY_ERR"
     exit 1
 fi
 
