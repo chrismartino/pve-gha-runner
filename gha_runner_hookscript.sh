@@ -110,26 +110,94 @@ echo "$NOW" > "$LAST_RECREATE_FILE"
 
 log "CT $VMID finished its job and powered off. Destroying and recreating."
 
-# A short initial wait before the first attempt, on top of already being
-# backgrounded - the outer stop task is usually done releasing its lock
-# within a second or two of this hookscript being invoked.
+# Short initial wait before the first attempt - addresses a different,
+# already-confirmed issue than the retry loop below: even backgrounded, the
+# outer stop task needs a moment to fully release its PVE-level lock on
+# $VMID, or the first attempt fails with "container is running" rather than
+# a ZFS-level error. Unlike the retry *count* below, this specific wait was
+# validated to matter, so it stays even though extending the retry budget
+# itself didn't help.
 sleep 2
 
+# Confirmed root cause of "dataset is busy": systemd auto-generates a .mount
+# unit for any path it discovers in the mount table, independent of the
+# container's own lifecycle - pve-container@$VMID.service deactivates
+# cleanly on schedule, but its rootfs's *.mount unit stays active/mounted
+# regardless, and that unit's own hold on the mount is what blocks
+# pct destroy/zfs destroy (no process has an open fd - lsof/fuser confirmed
+# that separately). Fix: stop that unit explicitly before destroying, rather
+# than just retrying and hoping something external clears it.
+ROOTFS_VOLID=$(pct config "$VMID" 2>/dev/null | grep '^rootfs:' | sed -E 's/^rootfs: *([^,]+),.*/\1/')
+MOUNT_UNIT=""
+if [ -n "$ROOTFS_VOLID" ]; then
+    ROOTFS_PATH=$(pvesm path "$ROOTFS_VOLID" 2>/dev/null)
+    if [ -n "$ROOTFS_PATH" ] && command -v systemd-escape >/dev/null 2>&1; then
+        MOUNT_UNIT=$(systemd-escape --path --suffix=mount "$ROOTFS_PATH")
+    fi
+fi
+
+# Retry budget kept short (~40s) rather than long: testing showed extending
+# it to ~2 minutes didn't change the outcome when the systemd-unit fix below
+# wasn't yet in place - genuinely transient cases resolve fast, and
+# persistent ones (like the mount-unit hold) need the fix above, not more
+# waiting. Persistent failures fall through to the diagnostics below either way.
 DESTROY_OK=false
 DESTROY_ERR=""
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
+for attempt in $(seq 1 8); do
+    # Stop the mount unit before every attempt, not just after a failure -
+    # systemd can regenerate/re-activate these transient units, so this is
+    # cheap insurance on each pass rather than a one-time fix.
+    if [ -n "$MOUNT_UNIT" ]; then
+        systemctl stop "$MOUNT_UNIT" >/dev/null 2>&1 || true
+    fi
+    # Defensive: if this container was ever inspected via `pct mount` during
+    # debugging and never explicitly unmounted, the ZFS dataset stays held
+    # and every destroy attempt fails with "dataset is busy" indefinitely -
+    # not a transient race, a real leftover resource. No-op (and harmless)
+    # if it wasn't mounted.
+    pct unmount "$VMID" >/dev/null 2>&1 || true
     if DESTROY_ERR=$(pct destroy "$VMID" --purge 2>&1); then
         DESTROY_OK=true
         break
     fi
-    log "pct destroy $VMID attempt $attempt/10 failed, retrying in 3s: $DESTROY_ERR"
-    sleep 3
+    log "pct destroy $VMID attempt $attempt/8 failed, retrying in 5s: $DESTROY_ERR"
+    # Lightweight check captured WHILE it's still failing, not after - the
+    # detailed zfs/mount diagnostics below only run once, at the very end,
+    # by which point whatever was holding it may have already cleared and
+    # given a misleadingly clean reading. This catches the host-side systemd
+    # unit for the container specifically, since that's tracked separately
+    # from the container's own "stopped" state that triggered this hook.
+    SYSTEMD_UNITS=$(systemctl list-units --all --no-legend 2>/dev/null | grep -F "$VMID" || true)
+    [ -n "$SYSTEMD_UNITS" ] && log "  (attempt $attempt) systemd units mentioning $VMID: $SYSTEMD_UNITS"
+    sleep 5
 done
 
 if [ "$DESTROY_OK" != "true" ]; then
-    log "ERROR: pct destroy $VMID failed after 10 attempts. Not attempting to create a" \
-        "replacement until this is resolved (leftover container may be in a bad state)."
+    log "ERROR: pct destroy $VMID failed after 8 attempts (~40s). Not attempting" \
+        "to create a replacement until this is resolved (leftover container may be in a" \
+        "bad state)."
     log "Last error: $DESTROY_ERR"
+
+    # Diagnostics: capture what's actually holding the dataset busy, since a
+    # fixed-duration retry not clearing it points at something that won't
+    # resolve just by waiting longer (a leaked mount, not a slow teardown).
+    ZFS_DATASET=$(echo "$DESTROY_ERR" | grep -oE "destroy '[^']+'" | sed -E "s/destroy '(.+)'/\1/")
+    if [ -n "$ZFS_DATASET" ]; then
+        log "Diagnostics for $ZFS_DATASET:"
+        log "  zfs holds: $(zfs holds "$ZFS_DATASET" 2>&1)"
+        MOUNTPOINT=$(zfs get -H -o value mountpoint "$ZFS_DATASET" 2>/dev/null)
+        log "  mountpoint: ${MOUNTPOINT:-unknown}"
+        log "  host mounts under it: $(mount | grep -F "${MOUNTPOINT:-__none__}" || echo "none")"
+        if [ -n "$MOUNTPOINT" ] && command -v fuser >/dev/null 2>&1; then
+            log "  fuser -vm: $(fuser -vm "$MOUNTPOINT" 2>&1)"
+        fi
+        if [ -n "$MOUNTPOINT" ] && command -v lsof >/dev/null 2>&1; then
+            log "  lsof (first 20 lines): $(lsof +D "$MOUNTPOINT" 2>&1 | head -20)"
+        fi
+    else
+        log "Could not parse dataset name out of the destroy error to run diagnostics on."
+    fi
+
     return 1
 fi
 
