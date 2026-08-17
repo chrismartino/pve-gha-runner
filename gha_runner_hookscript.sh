@@ -13,17 +13,27 @@
 #      cp gha_runner_hookscript.sh /var/lib/vz/snippets/
 #      chmod 700 /var/lib/vz/snippets/gha_runner_hookscript.sh
 #
-# 2. Put the main creation script somewhere permanent and fill in CONFIG below
-#    (MAIN_SCRIPT_PATH, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, OWNERREPO).
-#    The private key path must be readable by root only.
+# 2. Put the main creation script somewhere permanent and set MAIN_SCRIPT_PATH
+#    below if it's not at the default location.
 #
-# 3. The FIRST container needs to be created by hand, once, with
-#    EPHEMERAL_RUNNER=true, so it picks up -hookscript pointing at this file
-#    (see HOOKSCRIPT_VOLID in the main script). Every container it recreates
-#    after that inherits the same flag automatically.
+# 3. For each repo, create a per-repo config file at
+#    /etc/gha-runner/<slug>.conf (slug = owner/repo with "/" -> "-", e.g.
+#    /etc/gha-runner/myorg-myrepo.conf), setting GITHUB_APP_ID,
+#    GITHUB_APP_PRIVATE_KEY_PATH, OWNERREPO, and optionally MAX_RUNNERS /
+#    EXTRA_INSTALL_SCRIPT for that repo. See examples/repo.conf.example.
+#    Each private key path must be readable by root only. This hookscript
+#    file is shared across all repos - it reads back the "repo-<slug>" tag
+#    (set by the main script at container creation) to know which repo a
+#    given container belongs to, and sources that repo's config file.
 #
-# 4. Install the log rotation config, or recreate.log/hook.log will grow
-#    unbounded:
+# 4. The FIRST container for each repo needs to be created by hand, once,
+#    with EPHEMERAL_RUNNER=true and OWNERREPO set to that repo, so it picks
+#    up -hookscript pointing at this file (see HOOKSCRIPT_VOLID in the main
+#    script) and the "repo-<slug>" tag. Every container it recreates after
+#    that inherits both automatically.
+#
+# 5. Install the log rotation config, or recreate-<slug>.log/hook-<slug>.log
+#    (one pair per repo, under /var/lib/gha-runner-hook/) will grow unbounded:
 #      cp gha-runner-hook.logrotate /etc/logrotate.d/gha-runner-hook
 #
 # How Proxmox invokes this: `<script> <vmid> <phase>` where phase is one of
@@ -37,24 +47,31 @@ set -u
 VMID="$1"
 PHASE="$2"
 
-# --- CONFIG: fill these in ---
-MAIN_SCRIPT_PATH="/root/lxc_create_github_actions_runner_app.sh"
-GITHUB_APP_ID=""
-GITHUB_APP_PRIVATE_KEY_PATH=""
-OWNERREPO=""
-EXTRA_INSTALL_SCRIPT=""
+# --- CONFIG: fill this in ---
+MAIN_SCRIPT_PATH="/root/create-pve-lxc-gha-runner.sh"
+# Per-repo config lives in $CONFIG_DIR/<slug>.conf - see step 3 above.
+CONFIG_DIR="/etc/gha-runner"
 # --- end config ---
 
 STATE_DIR="/var/lib/gha-runner-hook"
-LAST_RECREATE_FILE="$STATE_DIR/last_recreate"
 MIN_RECREATE_INTERVAL=60  # seconds - flap guard, see below
 
 # Marker used to re-invoke this file via systemd-run instead of a real phase.
 DETACHED_MARKER="__gha_detached_post_stop__"
 
+# Set once the repo tag is resolved below - declared empty here (rather than
+# left unset) so log() can reference it safely under `set -u` even for the
+# messages logged before that point (hostname mismatch, missing tag).
+REPO_SLUG=""
+
 log() {
-    logger -t gha-runner-hook "$*"
-    echo "[gha-runner-hook] $*"
+    local repo_tag=""
+    [ -n "$REPO_SLUG" ] && repo_tag="[$REPO_SLUG] "
+    # Syslog tag stays constant (not repo-suffixed) so `journalctl -t
+    # gha-runner-hook` still catches everything across every repo; the
+    # per-repo prefix lives in the message text instead.
+    logger -t gha-runner-hook "$repo_tag$*"
+    echo "[gha-runner-hook] $repo_tag$*"
 }
 
 # Only act on post-stop (or our own detached re-invocation).
@@ -72,6 +89,47 @@ case "$HOSTNAME" in
         exit 0
         ;;
 esac
+
+# Resolve which repo this container belongs to from its "repo-<slug>" tag
+# (set by the main script at creation - see -tags there) and source that
+# repo's config. This is what lets one hookscript file serve any number of
+# repos instead of one hardcoded OWNERREPO.
+CTTAGS=$(pct config "$VMID" 2>/dev/null | awk -F': ' '/^tags:/ {print $2}')
+REPO_SLUG=""
+for tag in $(echo "$CTTAGS" | tr ',;' '  '); do
+    case "$tag" in
+        repo-*) REPO_SLUG="${tag#repo-}" ;;
+    esac
+done
+if [ -z "$REPO_SLUG" ]; then
+    log "post-stop fired for CT $VMID but no repo-<slug> tag found (tags: ${CTTAGS:-none}) - can't tell which repo config to use, ignoring"
+    exit 0
+fi
+
+REPO_CONF="$CONFIG_DIR/$REPO_SLUG.conf"
+if [ ! -f "$REPO_CONF" ]; then
+    log "post-stop fired for CT $VMID (repo slug: $REPO_SLUG) but no config at $REPO_CONF - ignoring"
+    exit 0
+fi
+# shellcheck source=/dev/null
+. "$REPO_CONF"
+if [ -z "${GITHUB_APP_ID:-}" ] || [ -z "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ] || [ -z "${OWNERREPO:-}" ]; then
+    log "ERROR: $REPO_CONF is missing GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, or OWNERREPO - refusing to act on CT $VMID"
+    exit 1
+fi
+MAX_RUNNERS="${MAX_RUNNERS:-3}"
+
+# Per-repo, not one shared file: with multiple repos' containers stopping
+# independently, a single hook.log/recreate.log interleaves unrelated repos'
+# output with only "CT $VMID" in each line to tell them apart.
+HOOK_LOG="$STATE_DIR/hook-$REPO_SLUG.log"
+RECREATE_LOG="$STATE_DIR/recreate-$REPO_SLUG.log"
+
+# Per-VMID, not a single global file: two runners (from the same or
+# different repos) finishing jobs within MIN_RECREATE_INTERVAL of each other
+# is normal under load, and shouldn't make the second look like a flap of
+# the first.
+LAST_RECREATE_FILE="$STATE_DIR/last_recreate-$VMID"
 
 mkdir -p "$STATE_DIR"
 
@@ -193,15 +251,17 @@ export EPHEMERAL_RUNNER=true
 export GITHUB_APP_ID
 export GITHUB_APP_PRIVATE_KEY_PATH
 export OWNERREPO
-[ -n "$EXTRA_INSTALL_SCRIPT" ] && export EXTRA_INSTALL_SCRIPT
+export MAX_RUNNERS
+[ -n "${EXTRA_INSTALL_SCRIPT:-}" ] && export EXTRA_INSTALL_SCRIPT
+[ -n "${GITHUB_APP_INSTALLATION_ID:-}" ] && export GITHUB_APP_INSTALLATION_ID
 
 log "Recreating..."
-if ! "$MAIN_SCRIPT_PATH" >>"$STATE_DIR/recreate.log" 2>&1; then
-    log "ERROR: $MAIN_SCRIPT_PATH exited non-zero. Check $STATE_DIR/recreate.log."
+if ! "$MAIN_SCRIPT_PATH" >>"$RECREATE_LOG" 2>&1; then
+    log "ERROR: $MAIN_SCRIPT_PATH exited non-zero. Check $RECREATE_LOG."
     return 1
 fi
 
-log "Recreation finished (see $STATE_DIR/recreate.log for details)."
+log "Recreation finished (see $RECREATE_LOG for details)."
 }
 
 if [ "$PHASE" = "$DETACHED_MARKER" ]; then
@@ -218,17 +278,19 @@ fi
 # vmid+marker to re-run the FILE (rather than exporting a function/vars
 # through systemd-run) sidesteps environment-inheritance uncertainty - a
 # fresh transient unit doesn't inherit the caller's shell environment by
-# default, but the CONFIG block above is hardcoded literals read fresh from
-# the file, so a clean re-invocation just works.
+# default, but the detached re-invocation re-derives everything itself (repo
+# tag lookup, sourcing the per-repo config) rather than depending on
+# anything from this process's environment, so a clean re-invocation just
+# works.
 log "post-stop received for CT $VMID, relaunching detached via systemd-run"
 if command -v systemd-run >/dev/null 2>&1; then
     systemd-run --quiet --collect \
         --unit="gha-runner-hook-${VMID}-$(date +%s)" \
         --description="GHA runner post-stop handler for CT $VMID" \
-        "$0" "$VMID" "$DETACHED_MARKER" >>"$STATE_DIR/hook.log" 2>&1
+        "$0" "$VMID" "$DETACHED_MARKER" >>"$HOOK_LOG" 2>&1
 else
     log "Warning: systemd-run not found, falling back to plain background job"
-    ( handle_poststop ) >>"$STATE_DIR/hook.log" 2>&1 &
+    ( handle_poststop ) >>"$HOOK_LOG" 2>&1 &
     disown
 fi
 

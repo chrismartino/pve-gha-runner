@@ -14,8 +14,9 @@ Adapted and enhanced from
 | File | Purpose |
 |---|---|
 | `create-pve-lxc-gha-runner.sh` | Creates an unprivileged Ubuntu 24.04 LXC container and registers it as a GitHub Actions runner (Docker and other extra dependencies are optional — see [Installing extra dependencies](#installing-extra-dependencies)). Run by hand, or invoked automatically by the hookscript. |
-| `gha_runner_hookscript.sh` | Proxmox post-stop hookscript. Only used in ephemeral mode: when a runner container powers off after finishing its one job, this destroys it and creates its replacement. |
-| `gha-runner-hook.logrotate` | logrotate config for the hookscript's logs (`recreate.log`, `hook.log`). Only needed in ephemeral mode — see step 4 under [Ephemeral runner pool](#ephemeral-runner-pool-self-healing). |
+| `gha_runner_hookscript.sh` | Proxmox post-stop hookscript. Only used in ephemeral mode: when a runner container powers off after finishing its one job, this destroys it and creates its replacement. One file serves every repo — it identifies which repo a container belongs to via its `repo-<slug>` tag and sources that repo's config from `/etc/gha-runner/<slug>.conf`. |
+| `gha-runner-hook.logrotate` | logrotate config for the hookscript's logs — one `recreate-<slug>.log`/`hook-<slug>.log` pair per repo. Only needed in ephemeral mode — see step 5 under [Ephemeral runner pool](#ephemeral-runner-pool-self-healing). |
+| `stop-and-cleanup-gha-runners.sh` | Stops and destroys (`--purge`) every `gha-runner-*` container without letting the hookscript recreate them. See [Stopping and cleaning up all runners](#stopping-and-cleaning-up-all-runners). |
 
 ## Prerequisites
 
@@ -108,22 +109,37 @@ without ever reusing container state between jobs.
    chmod 700 /var/lib/vz/snippets/gha_runner_hookscript.sh
    ```
 
-2. Put the creation script somewhere permanent (e.g. `/root/`) and edit the
-   **CONFIG** block at the top of `gha_runner_hookscript.sh`:
+2. Put the creation script somewhere permanent (e.g. `/root/`). If it's not
+   at the default path, update `MAIN_SCRIPT_PATH` in the **CONFIG** block at
+   the top of `gha_runner_hookscript.sh`.
+
+3. For **each repo**, create a per-repo config file at
+   `/etc/gha-runner/<slug>.conf`, where `<slug>` is `owner/repo` with `/`
+   replaced by `-` and lowercased (e.g. `someorg/somerepo` →
+   `/etc/gha-runner/someorg-somerepo.conf`):
 
    ```sh
-   MAIN_SCRIPT_PATH="/root/create-pve-lxc-gha-runner.sh"
+   mkdir -p /etc/gha-runner
+   cat > /etc/gha-runner/someorg-somerepo.conf <<'EOF'
    GITHUB_APP_ID="123456"
    GITHUB_APP_PRIVATE_KEY_PATH="/root/my-app.private-key.pem"
    OWNERREPO="someorg/somerepo"
+   EOF
+   chmod 600 /etc/gha-runner/someorg-somerepo.conf
    ```
 
-   The hookscript runs as root and reads the private key path directly, so
-   make sure that key file is root-only readable (`chmod 600`).
+   One hookscript file serves every repo: at post-stop time it reads back the
+   `repo-<slug>` tag Proxmox stores on the container (set automatically by
+   the main script at creation) and sources that repo's config file. Each
+   private key must be root-only readable (`chmod 600`). See
+   [`examples/repo.conf.example`](examples/repo.conf.example) for the full
+   set of optional fields (`MAX_RUNNERS`, `EXTRA_INSTALL_SCRIPT`,
+   `GITHUB_APP_INSTALLATION_ID`).
 
-3. Create the **first** container by hand, once, with `EPHEMERAL_RUNNER=true`
-   so it picks up the `-hookscript` flag pointing at the file from step 1.
-   Every container it creates after that inherits the flag automatically:
+4. Create the **first** container for each repo by hand, once, with
+   `EPHEMERAL_RUNNER=true` so it picks up both the `-hookscript` flag
+   pointing at the file from step 1 and the `repo-<slug>` tag. Every
+   container it creates after that inherits both automatically:
 
    ```sh
    EPHEMERAL_RUNNER=true \
@@ -133,8 +149,9 @@ without ever reusing container state between jobs.
    ./create-pve-lxc-gha-runner.sh
    ```
 
-4. Install the log rotation config, or `recreate.log`/`hook.log` under
-   `/var/lib/gha-runner-hook/` will grow unbounded:
+5. Install the log rotation config, or the per-repo `recreate-<slug>.log`/
+   `hook-<slug>.log` pairs under `/var/lib/gha-runner-hook/` will grow
+   unbounded:
 
    ```sh
    cp gha-runner-hook.logrotate /etc/logrotate.d/gha-runner-hook
@@ -142,6 +159,8 @@ without ever reusing container state between jobs.
 
 From then on, the cycle is: container runs one job → powers off → hookscript
 destroys it → hookscript recreates it → repeat. No further manual steps.
+Repeat steps 3–4 for each additional repo you want a pool for — steps 1, 2,
+and 5 only need doing once, ever.
 
 The hookscript re-invokes itself via `systemd-run` as a detached transient
 unit (falling back to a plain backgrounded job if `systemd-run` isn't
@@ -151,22 +170,49 @@ failing with a "permission denied" error while mounting the replacement
 container's dataset, which the sandboxed context the hookscript inherits at
 post-stop time could otherwise cause.
 
-**Runner pool size:** `MAX_RUNNERS` (default `3`) caps how many
-`gha-runner-*` containers can exist concurrently — checked via `pct list`
-before any container is created, whether triggered by hand or by the
-hookscript. Raise it if you want more parallel runners:
+**Runner pool size:** `MAX_RUNNERS` (default `3`) is **per repo** — it caps
+how many `gha-runner-*` containers tagged for a given repo (`repo-<slug>`)
+can exist concurrently, checked before any container is created, whether
+triggered by hand or by the hookscript. Different repos can have different
+pool sizes. Raise it for a given repo either by exporting it for a manual
+run, or by setting `MAX_RUNNERS` in that repo's `/etc/gha-runner/<slug>.conf`
+so the hookscript picks it up on every recreation:
 
 ```sh
 MAX_RUNNERS=5 EPHEMERAL_RUNNER=true ... ./create-pve-lxc-gha-runner.sh
 ```
 
 **If registration keeps failing** (revoked App install, bad key, GitHub API
-unreachable), the hookscript has a flap guard: it refuses to recreate more
-than once every 60 seconds, destroys the broken container, and logs the
-reason via `logger` (tag `gha-runner-hook`, also mirrored to
-`/var/lib/gha-runner-hook/recreate.log`) instead of spinning. Fix the
+unreachable), the hookscript has a flap guard, tracked **per container**: it
+refuses to recreate a given `VMID` more than once every 60 seconds, destroys
+the broken container, and logs the reason via `logger` (tag `gha-runner-hook`
+— `journalctl -t gha-runner-hook` shows every repo's entries together, each
+line prefixed `[<repo-slug>]`; also mirrored to that repo's
+`/var/lib/gha-runner-hook/recreate-<slug>.log`) instead of spinning. Fix the
 underlying issue, then rerun the main script by hand with
 `EPHEMERAL_RUNNER=true` to resume.
+
+### Stopping and cleaning up all runners
+
+Because the hookscript fires on **any** stop of a container it's attached to
+— not just the end-of-job poweroff — a plain `pct stop` + `pct destroy` loop
+would just get every container recreated out from under you. Use
+`stop-and-cleanup-gha-runners.sh` instead:
+
+```sh
+./stop-and-cleanup-gha-runners.sh
+```
+
+Run as root on the Proxmox host. It finds every `gha-runner-*` container,
+removes its `-hookscript` property before stopping it (so nothing gets
+recreated), then destroys it (`pct destroy --purge`) and clears its
+flap-guard state. It also stops any recreate job already in flight from a
+stop that happened moments earlier, and sweeps a few passes to catch a
+recreate that still slips through the race window. It prompts for
+confirmation and lists what it's about to touch first; pass `-y` to skip the
+prompt for non-interactive use. It only touches `gha-runner-*` containers —
+your `/etc/gha-runner/*.conf` files and the scripts themselves are untouched,
+so the next manual run or first-container setup works as before.
 
 ## Installing extra dependencies
 
@@ -189,8 +235,8 @@ An example that installs Docker CE is in
 
 In ephemeral mode this reruns on **every** container recreation (once per
 job), so keep it fast. To use it with the hookscript's self-recreating pool,
-also set `EXTRA_INSTALL_SCRIPT` in the CONFIG block of
-`gha_runner_hookscript.sh`.
+set `EXTRA_INSTALL_SCRIPT` in that repo's `/etc/gha-runner/<slug>.conf` (see
+step 3 under [Ephemeral runner pool](#ephemeral-runner-pool-self-healing)).
 
 ## Organization-level runners
 
@@ -227,7 +273,7 @@ Variables at the top of `create-pve-lxc-gha-runner.sh`:
 | `PCT_CORES` / `PCT_MEMORY` / `PCT_SWAP` | `4` / `4096` / `4096` | Container resources. |
 | `PCT_STORAGE` | `local-zfs` | Where the container's rootfs is provisioned. |
 | `TEMPL_STORAGE` | `local` | Where the Ubuntu template is downloaded (must support `vztmpl`; `local-zfs` usually doesn't). |
-| `MAX_RUNNERS` | `3` | Max concurrent `gha-runner-*` containers. Env var. |
+| `MAX_RUNNERS` | `3` | Max concurrent `gha-runner-*` containers **for the given repo** (`repo-<slug>` tag), not a global cap across all repos. Env var. |
 | `EPHEMERAL_RUNNER` | `false` | Set `true` to use ephemeral mode. Env var. |
 | `EXTRA_INSTALL_SCRIPT` | (unset) | Path to a local script to run inside the container for extra dependencies. Env var. See [Installing extra dependencies](#installing-extra-dependencies). |
 | `HOOKSCRIPT_VOLID` | `local:snippets/gha_runner_hookscript.sh` | Proxmox volid of the hookscript; only used when `EPHEMERAL_RUNNER=true`. |
