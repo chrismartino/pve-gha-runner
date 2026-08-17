@@ -72,9 +72,59 @@ log() {
     echo -e "\033[33m$text\033[0m"
 }
 
-RUNNING_RUNNERS=$(pct list 2>/dev/null | awk 'NR>1 && $NF ~ /^gha-runner-/ {c++} END{print c+0}')
+# Fetches a "token" field from a GitHub API POST response, retrying on
+# transient failures (api.github.com occasionally 5xx's, e.g. a bare 503 on
+# the registration-token endpoint with no other explanation). Deliberately
+# does NOT use curl's -f here: -f discards the response body on a non-2xx,
+# which is exactly what we need to log for debugging, and as a bare
+# assignment (not piped) a -f failure would abort the whole script under
+# `set -e` before the retry loop - or any error message - ever ran.
+# Prints the token on success; on exhausted retries, prints the last
+# response to stderr and returns non-zero.
+fetch_gh_token() {
+    local desc="$1"; shift
+    local max_attempts=5 attempt=1 delay=3
+    local res token
+    while [ "$attempt" -le "$max_attempts" ]; do
+        res=$(curl -sS "$@")
+        token=$(echo "$res" | grep -o '"token": *"[^"]*' | head -1 | grep -o '[^"]*$' || true)
+        if [ -n "$token" ]; then
+            printf '%s' "$token"
+            return 0
+        fi
+        if [ "$attempt" -eq "$max_attempts" ]; then
+            echo "$res" >&2
+            return 1
+        fi
+        log "-- $desc: no token in response (attempt $attempt/$max_attempts), retrying in ${delay}s..." >&2
+        sleep "$delay"
+        attempt=$((attempt + 1))
+        delay=$((delay * 2))
+    done
+}
+
+# OWNERREPO is needed up front (before the App/JWT prompts below) so
+# MAX_RUNNERS can be checked per-repo: multiple repos each get their own pool
+# via a "repo-<slug>" tag on the container, rather than sharing one global
+# count of all gha-runner-* containers.
+if [ -z "$OWNERREPO" ]; then
+    read -r -p "Enter github owner/repo: " OWNERREPO
+    echo
+fi
+# Proxmox tags allow [a-z0-9_.-] - lowercase and swap "/" for "-".
+REPO_SLUG=$(echo "$OWNERREPO" | tr '[:upper:]' '[:lower:]' | tr '/' '-')
+
+RUNNING_RUNNERS=0
+for ctid in $(pct list 2>/dev/null | awk 'NR>1 && $NF ~ /^gha-runner-/ {print $1}'); do
+    CTTAGS=$(pct config "$ctid" 2>/dev/null | awk -F': ' '/^tags:/ {print $2}')
+    # Tolerate comma as well as the standard semicolon separator, in case of
+    # older PVE versions or manually-edited tags.
+    case ";$(echo "$CTTAGS" | tr ',' ';');" in
+        *";repo-$REPO_SLUG;"*) RUNNING_RUNNERS=$((RUNNING_RUNNERS + 1)) ;;
+    esac
+done
 if [ "$RUNNING_RUNNERS" -ge "$MAX_RUNNERS" ]; then
-    log "Already at MAX_RUNNERS ($MAX_RUNNERS): found $RUNNING_RUNNERS existing gha-runner-* container(s). Not creating another."
+    log "Already at MAX_RUNNERS ($MAX_RUNNERS) for $OWNERREPO: found $RUNNING_RUNNERS existing gha-runner-* container(s) tagged repo-$REPO_SLUG. Not creating another."
     exit 0
 fi
 
@@ -116,11 +166,6 @@ fi
 if [ ! -f "$GITHUB_APP_PRIVATE_KEY_PATH" ]; then
     echo "Private key file not found at: $GITHUB_APP_PRIVATE_KEY_PATH" >&2
     exit 1
-fi
-
-if [ -z "$OWNERREPO" ]; then
-    read -r -p "Enter github owner/repo: " OWNERREPO
-    echo
 fi
 
 if [ -n "$EXTRA_INSTALL_SCRIPT" ] && [ ! -f "$EXTRA_INSTALL_SCRIPT" ]; then
@@ -178,19 +223,14 @@ fi
 # --- Exchange the JWT for a short-lived installation access token ---
 
 log "-- Requesting installation access token"
-INSTALL_TOKEN_RES=$(curl -sS -X POST \
+INSTALLATION_TOKEN=$(fetch_gh_token "installation access token" -X POST \
     -H "Authorization: Bearer $APP_JWT" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/app/installations/$GITHUB_APP_INSTALLATION_ID/access_tokens")
-
-INSTALLATION_TOKEN=$(echo "$INSTALL_TOKEN_RES" | grep -o '"token": *"[^"]*' | head -1 | grep -o '[^"]*$' || true)
-
-if [ -z "$INSTALLATION_TOKEN" ]; then
-    echo "Failed to obtain installation access token." >&2
-    echo "$INSTALL_TOKEN_RES" >&2
+    "https://api.github.com/app/installations/$GITHUB_APP_INSTALLATION_ID/access_tokens") || {
+    echo "Failed to obtain installation access token after retries." >&2
     exit 1
-fi
+}
 
 TEMPL_FILE=$(basename "$TEMPL_URL")
 PCTID=$(pvesh get /cluster/nextid)
@@ -225,6 +265,12 @@ PCT_CREATE_ARGS=(
     -storage $PCT_STORAGE
     -features nesting=1,keyctl=1,fuse=1
     -net0 name=eth0,bridge=vmbr0,ip=dhcp,type=veth
+    # "repo-<slug>" lets one hookscript serve multiple repos: it reads this
+    # tag back at post-stop time to know which repo/App config to use,
+    # instead of having a single repo hardcoded in the hookscript file.
+    # Proxmox tags are semicolon-separated (both in `pct config` output and
+    # the -tags argument here).
+    -tags "gha-runner;repo-$REPO_SLUG"
 )
 if [ "$EPHEMERAL_RUNNER" = "true" ]; then
     if [ ! -f "/var/lib/vz/snippets/$(basename "${HOOKSCRIPT_VOLID#*:snippets/}")" ] \
@@ -261,19 +307,14 @@ fi
 log "-- Getting runner installation token"
 # Org-level runner instead of repo-level: swap for
 # https://api.github.com/orgs/$ORG/actions/runners/registration-token
-RES=$(curl -fsS -L \
-    -X POST \
+RUNNER_TOKEN=$(fetch_gh_token "runner registration token" -X POST \
     -H "Accept: application/vnd.github+json" \
     -H "Authorization: Bearer $INSTALLATION_TOKEN" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/repos/$OWNERREPO/actions/runners/registration-token")
-RUNNER_TOKEN=$(echo "$RES" | grep -o '"token": "[^"]*' | grep -o '[^"]*$' || true)
-
-if [ -z "$RUNNER_TOKEN" ]; then
-    echo "Failed to obtain runner registration token." >&2
-    echo "$RES" >&2
+    "https://api.github.com/repos/$OWNERREPO/actions/runners/registration-token") || {
+    echo "Failed to obtain runner registration token after retries." >&2
     exit 1
-fi
+}
 
 # RUNNER_TOKEN is written into a script pushed into the container and run
 # there, rather than inlined into `pct exec ... bash -c "...$RUNNER_TOKEN..."`,

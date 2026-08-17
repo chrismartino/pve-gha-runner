@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+#
+# Example per-repo config for gha_runner_hookscript.sh.
+#
+# Install one of these per repo at:
+#   /etc/gha-runner/<slug>.conf
+# where <slug> is owner/repo with "/" replaced by "-" and lowercased, e.g.
+# "myorg/myrepo" -> /etc/gha-runner/myorg-myrepo.conf
+#
+# This file must be readable by root only (chmod 600) since it references
+# the App's private key path and, indirectly, its credentials.
+#
+# The hookscript sources this file directly - keep it valid POSIX shell
+# variable assignments, nothing else.
+
+GITHUB_APP_ID=""
+GITHUB_APP_PRIVATE_KEY_PATH=""
+OWNERREPO="myorg/myrepo"
+
+# Optional - all fall back to the same defaults as the main script if unset.
+# MAX_RUNNERS="3"
+# EXTRA_INSTALL_SCRIPT="/root/install-docker.sh"
+# GITHUB_APP_INSTALLATION_ID=""
