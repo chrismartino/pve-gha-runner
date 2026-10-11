@@ -26,7 +26,8 @@ The README advises against it.
 
 ## Supported versions
 
-Only the latest release and `main` receive fixes.
+Only the latest release is supported. Security fixes ship as a new release, so
+please upgrade rather than asking for a patch to an older version.
 
 ## Reporting a vulnerability
 
