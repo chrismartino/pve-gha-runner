@@ -82,19 +82,26 @@ disagree.
    Proxmox host, including the README's Upgrading steps from the previous
    version.
 3. **Merge** the PR (squash).
-4. **Tag the merge commit on `main` and push the tag:**
+4. **Create the release from the merge commit on `main`.** Either way works,
+   and both start the release workflow when the new tag appears:
 
-   ```sh
-   git switch main && git pull
-   git tag vX.Y.Z && git push origin vX.Y.Z
-   ```
+   - push the tag:
 
-   The release workflow checks that the tag, both `VERSION` lines and the
-   changelog agree, then builds the assets and `SHA256SUMS`, attests
-   provenance, and creates the GitHub release with generated notes. If the
-   check fails nothing is published: delete the tag
-   (`git push origin :refs/tags/vX.Y.Z`), fix the mismatch in a PR, and tag
-   again.
+     ```sh
+     git switch main && git pull
+     git tag vX.Y.Z && git push origin vX.Y.Z
+     ```
+
+   - or use GitHub's **Releases → Draft a new release**: create the new tag
+     `vX.Y.Z` on `main` and publish.
+
+   The workflow checks that the tag, both `VERSION` lines and the changelog
+   agree, then builds the assets and `SHA256SUMS`, attests provenance, and
+   publishes: it attaches the assets to the release if you already created
+   one, or creates it with generated notes. If the check fails, no assets are
+   attached: delete the release (if you created one) and the tag
+   (`git push origin :refs/tags/vX.Y.Z`), fix the mismatch in a PR, and
+   create the release again.
 5. **Verify the release page:** the tarball, the scripts and `SHA256SUMS` are
    attached, and `gh attestation verify <file> --repo chrismartino/pve-gha-runner`
    succeeds on one of them.
