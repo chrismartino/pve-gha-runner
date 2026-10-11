@@ -61,3 +61,43 @@ hardware before opening the PR. Unreviewed generated code will be closed.
 ## Code of conduct
 
 Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Releasing (maintainers)
+
+Releases are made by pushing a version tag; a workflow builds and publishes
+everything. The tag is the version: the scripts carry a matching `VERSION`
+and the changelog a matching heading, and the release fails if any of them
+disagree.
+
+1. **Open a release PR that contains only the release bookkeeping** (feature
+   changes go in their own PRs):
+   - Set `VERSION="x.y.z"` in both `create-pve-lxc-gha-runner.sh` and
+     `gha_runner_hookscript.sh`.
+   - In `CHANGELOG.md`, rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`
+     and add a fresh empty `## [Unreleased]` above it. Make sure the
+     **Upgrade** line is right, and mark incompatible changes **Breaking**.
+   - Check that the README, `examples/` and the site describe every new
+     option from this release.
+2. **Before merging:** CI is green, and you have tested the release on a real
+   Proxmox host, including the README's Upgrading steps from the previous
+   version.
+3. **Merge** the PR (squash).
+4. **Tag the merge commit on `main` and push the tag:**
+
+   ```sh
+   git switch main && git pull
+   git tag vX.Y.Z && git push origin vX.Y.Z
+   ```
+
+   The release workflow checks that the tag, both `VERSION` lines and the
+   changelog agree, then builds the assets and `SHA256SUMS`, attests
+   provenance, and creates the GitHub release with generated notes. If the
+   check fails nothing is published: delete the tag
+   (`git push origin :refs/tags/vX.Y.Z`), fix the mismatch in a PR, and tag
+   again.
+5. **Verify the release page:** the tarball, the scripts and `SHA256SUMS` are
+   attached, and `gh attestation verify <file> --repo chrismartino/pve-gha-runner`
+   succeeds on one of them.
+
+Between releases `VERSION` stays at the last released version, so a copy
+installed from `main` reports that version. Install from a tag.

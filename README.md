@@ -317,6 +317,16 @@ That's it. Running containers pick up the new hookscript the next time they
 stop and are recreated; you don't need to touch them. To roll back, check out
 the previous version and run the two `install` commands again.
 
+To see which version is installed:
+
+```sh
+/root/create-pve-lxc-gha-runner.sh --version
+grep -m1 '^VERSION=' /var/lib/vz/snippets/gha_runner_hookscript.sh
+```
+
+After the next job, `journalctl -t gha-runner-hook` also shows the hookscript's
+version, and logs a warning if it differs from the creation script's.
+
 Both commands are needed because Proxmox runs the **copy in the snippets
 directory**, not the file in your clone. Adjust the paths if you changed
 `MAIN_SCRIPT_PATH` or use a different snippets storage, and if you edited the

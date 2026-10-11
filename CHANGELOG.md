@@ -22,6 +22,9 @@ opt-in.
   manual edit of the script).
 - GitHub Pages site, CI (shellcheck, shfmt, actionlint, zizmor, links),
   release workflow, and community files.
+- A `VERSION` in the creation script and the hookscript. The creation script
+  logs it and supports `--version`; the hookscript logs it on every post-stop
+  and warns if the two scripts are on different versions.
 - `.gitignore` for private keys (`*.pem`, `*.key`), `.env` files, and local configs.
 
 ### Changed
