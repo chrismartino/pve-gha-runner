@@ -12,6 +12,8 @@ general procedure is in the README's
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-11
+
 **Upgrade:** no action needed for existing repo-level pools. Update both
 scripts as described in the README. Org-level pools (`GITHUB_SCOPE=org`) are
 opt-in.
