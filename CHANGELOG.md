@@ -6,12 +6,14 @@ All notable changes are listed here. The format follows
 ## [Unreleased]
 
 ### Added
+
 - `GITHUB_SCOPE=org` / `GITHUB_ORG` for org-level runner pools (previously a
   manual edit of the script).
 - GitHub Pages site, CI (shellcheck, shfmt, actionlint, zizmor, links),
   release workflow, and community files.
 
 ### Changed
+
 - `OWNERREPO` and `GITHUB_ORG` are validated before use.
 - The hookscript validates the repo slug from the container tag before
   sourcing its config.

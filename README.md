@@ -271,7 +271,7 @@ Variables at the top of `create-pve-lxc-gha-runner.sh`:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `TEMPL_URL` | Ubuntu 24.04 LTS | Matches GitHub's own `ubuntu-latest` hosted runners. If this 404s (point-release rotation), run `pveam update && pveam available | grep ubuntu-24.04` on the host to find the current filename. |
+| `TEMPL_URL` | Ubuntu 24.04 LTS | Matches GitHub's own `ubuntu-latest` hosted runners. If this 404s (point-release rotation), run `pveam update && pveam available \| grep ubuntu-24.04` on the host to find the current filename. |
 | `PCTSIZE` | `20G` | Container disk size. |
 | `PCT_CORES` / `PCT_MEMORY` / `PCT_SWAP` | `4` / `4096` / `4096` | Container resources. |
 | `PCT_STORAGE` | `local-zfs` | Where the container's rootfs is provisioned. |
