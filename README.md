@@ -1,5 +1,10 @@
 # pve-gha-runner
 
+[![CI](https://github.com/chrismartino/pve-gha-runner/actions/workflows/ci.yml/badge.svg)](https://github.com/chrismartino/pve-gha-runner/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Docs site: <https://chrismartino.github.io/pve-gha-runner/>
+
 Scripts to create and manage self-hosted GitHub Actions runners as LXC
 containers on a Proxmox VE host — either as a persistent runner or as a pool
 of ephemeral, one-job-and-recreate runners.
@@ -8,6 +13,23 @@ Adapted and enhanced from
 [oNaiPs/proxmox-scripts](https://github.com/oNaiPs/proxmox-scripts)
 (`lxc_create_github_actions_runner.sh`), which is also MIT-licensed. See
 [Credits](#credits--differences-from-the-original) for what changed.
+
+> [!WARNING]
+> **Use these runners with private repositories.** On a public repository, a
+> pull request from a fork can run arbitrary code on a self-hosted runner.
+> Ephemeral containers limit the damage but do not make that safe. These
+> scripts also run **as root on your Proxmox host** — read them before you
+> run them.
+
+## Status and support
+
+- Tested on Proxmox VE 9 with Ubuntu 24.04 containers. Other versions are
+  untested.
+- Maintained on a best-effort basis, with no SLA. Questions belong in
+  [Discussions](https://github.com/chrismartino/pve-gha-runner/discussions);
+  bugs in [Issues](https://github.com/chrismartino/pve-gha-runner/issues).
+- Report security problems privately — see [SECURITY.md](SECURITY.md).
+- Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## What's here
 
@@ -47,10 +69,15 @@ into the container.
 3. Under **Repository permissions**, grant **Administration: Read and
    write** — this is what grants access to the runner
    registration-token endpoint.
-   - For **organization-level** runners instead of repo-level, grant the
-     **Organization permission** "Self-hosted runners: Read and write"
-     instead, and see [Organization-level runners](#organization-level-runners)
-     below for the one line you need to change in the script.
+   - **This is a broad permission** (it also covers repo settings and
+     branch protection). Create a **dedicated App** for this purpose, install
+     it only on the repositories that need runners, and keep its private key
+     root-only on the Proxmox host.
+   - For **organization-level** runners, grant the narrower **Organization
+     permission** "Self-hosted runners: Read and write" instead and run with
+     `GITHUB_SCOPE=org` — see
+     [Organization-level runners](#organization-level-runners). Prefer this
+     when it fits your setup.
 4. Deselect webhook subscriptions (not needed).
 5. Create the app, then generate and download a **private key (.pem)** —
    store it somewhere only root can read on the Proxmox host.
@@ -69,6 +96,15 @@ ssh root@<pve-host> chmod +x /root/create-pve-lxc-gha-runner.sh
 
 (Or `git clone https://github.com/chrismartino/pve-gha-runner.git` directly
 on the host.)
+
+Tagged [releases](https://github.com/chrismartino/pve-gha-runner/releases)
+include the scripts, a source tarball and a `SHA256SUMS` file, with build
+provenance attestations. To verify a downloaded file:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+gh attestation verify <file> --repo chrismartino/pve-gha-runner
+```
 
 ## 3. Run it
 
@@ -297,9 +333,23 @@ published SHA-256 checksum when available.
   list while `config.sh` runs — that's a limitation of the runner binary
   itself (it only accepts the token as a CLI flag), not something a wrapper
   can avoid.
+- These scripts run as root on the Proxmox host, and the hookscript sources
+  `/etc/gha-runner/<slug>.conf` as root. Keep `/etc/gha-runner/` and the
+  scripts writable by root only. Inputs (`OWNERREPO`, `GITHUB_ORG`) are
+  validated, and the repo slug read from a container tag is validated
+  before it is used to locate a config file.
+- Don't register these runners against **public** repositories (see the
+  warning at the top). Use a dedicated GitHub App, installed only where it is
+  needed.
 - Containers are unprivileged, with root's password locked (`passwd -l`)
   rather than deleted, so no PAM configuration can treat the account as
   passwordless. `pct exec`/`pct enter` from the host still work regardless.
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md). To
+report a vulnerability, use the repository's **Security** tab rather than a
+public issue.
 
 ## Credits & differences from the original
 
