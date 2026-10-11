@@ -101,9 +101,10 @@ on the host and copy the scripts into `/root/scripts/` as shown under
 directory (`cd /root/scripts`). This is also where the hookscript looks for
 it by default (`MAIN_SCRIPT_PATH`).
 
-Tagged [releases](https://github.com/chrismartino/pve-gha-runner/releases)
-include the scripts, a source tarball and a `SHA256SUMS` file, with build
-provenance attestations. To verify a downloaded file:
+[Releases](https://github.com/chrismartino/pve-gha-runner/releases) from 1.2.0
+on include the scripts, a source tarball and a `SHA256SUMS` file, with build
+provenance attestations (earlier releases have neither). To verify a
+downloaded file:
 
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing

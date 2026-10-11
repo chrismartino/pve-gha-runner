@@ -12,7 +12,7 @@ general procedure is in the README's
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-10-11
+## [1.2.0] - 2026-10-11
 
 **Upgrade:** no action needed for existing repo-level pools. Update both
 scripts as described in the README. Org-level pools (`GITHUB_SCOPE=org`) are
@@ -40,5 +40,6 @@ opt-in.
 
 ## Earlier history
 
-Pre-release work (single-repo and multi-repo ephemeral pools, hookscript
-race fixes, logrotate config) predates this changelog; see the git log.
+Versions 1.0.0 (the original scripts and hookscript fixes) and 1.1.0
+(multi-repo ephemeral pools) predate this changelog; see their
+[GitHub releases](https://github.com/chrismartino/pve-gha-runner/releases).
