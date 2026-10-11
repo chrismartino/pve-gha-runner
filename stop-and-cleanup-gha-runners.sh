@@ -45,8 +45,11 @@ log "-- About to stop and destroy (--purge) these containers:$TARGETS"
 if [ "$FORCE" != "true" ]; then
     read -r -p "Proceed? [y/N] " CONFIRM
     case "$CONFIRM" in
-        y|Y|yes|YES) ;;
-        *) log "-- Aborted."; exit 1 ;;
+        y | Y | yes | YES) ;;
+        *)
+            log "-- Aborted."
+            exit 1
+            ;;
     esac
 fi
 

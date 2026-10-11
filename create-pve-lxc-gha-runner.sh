@@ -81,7 +81,8 @@ log() {
 # Prints the token on success; on exhausted retries, prints the last
 # response to stderr and returns non-zero.
 fetch_gh_token() {
-    local desc="$1"; shift
+    local desc="$1"
+    shift
     local max_attempts=5 attempt=1 delay=3
     local res token
     while [ "$attempt" -le "$max_attempts" ]; do
@@ -175,8 +176,8 @@ RUNNER_TAG=$(echo "$RUNNER_RELEASE_JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"
 RUNNER_VERSION="${RUNNER_TAG#v}"
 GITHUB_RUNNER_FILE="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
 GITHUB_RUNNER_URL="https://github.com/actions/runner/releases/download/${RUNNER_TAG}/${GITHUB_RUNNER_FILE}"
-GITHUB_RUNNER_SHA256=$(echo "$RUNNER_RELEASE_JSON" | grep -A30 "\"name\": \"$GITHUB_RUNNER_FILE\"" \
-    | grep -m1 '"digest"' | sed -E 's/.*"digest": *"sha256:([a-f0-9]+)".*/\1/' || true)
+GITHUB_RUNNER_SHA256=$(echo "$RUNNER_RELEASE_JSON" | grep -A30 "\"name\": \"$GITHUB_RUNNER_FILE\"" |
+    grep -m1 '"digest"' | sed -E 's/.*"digest": *"sha256:([a-f0-9]+)".*/\1/' || true)
 
 if [ -z "$RUNNER_VERSION" ]; then
     echo "Could not resolve the latest actions/runner release version." >&2
@@ -219,8 +220,8 @@ b64url() {
 generate_app_jwt() {
     local now iat exp header payload header_b64 payload_b64 signature
     now=$(date +%s)
-    iat=$((now - 60))     # allow for clock drift
-    exp=$((now + 540))    # GitHub's max is 10 minutes; use 9 to be safe
+    iat=$((now - 60))  # allow for clock drift
+    exp=$((now + 540)) # GitHub's max is 10 minutes; use 9 to be safe
 
     header='{"alg":"RS256","typ":"JWT"}'
     payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$iat" "$exp" "$GITHUB_APP_ID")
@@ -273,8 +274,8 @@ PCTID=$(pvesh get /cluster/nextid)
 
 # pveam checksum-verifies against Proxmox's manifest; a raw curl download doesn't.
 log "-- Downloading $TEMPL_FILE template..."
-if command -v pveam >/dev/null 2>&1 && pveam update >/dev/null 2>&1 \
-    && pveam available --section system 2>/dev/null | grep -q "$TEMPL_FILE"; then
+if command -v pveam >/dev/null 2>&1 && pveam update >/dev/null 2>&1 &&
+    pveam available --section system 2>/dev/null | grep -q "$TEMPL_FILE"; then
     pveam download "$TEMPL_STORAGE" "$TEMPL_FILE"
     TEMPL_FILE_PATH="/var/lib/vz/template/cache/$TEMPL_FILE"
     [ -f "$TEMPL_FILE_PATH" ] || TEMPL_FILE_PATH=$(pvesm path "$TEMPL_STORAGE:vztmpl/$TEMPL_FILE" 2>/dev/null || echo "$TEMPL_FILE")
@@ -309,8 +310,8 @@ PCT_CREATE_ARGS=(
     -tags "gha-runner;repo-$REPO_SLUG"
 )
 if [ "$EPHEMERAL_RUNNER" = "true" ]; then
-    if [ ! -f "/var/lib/vz/snippets/$(basename "${HOOKSCRIPT_VOLID#*:snippets/}")" ] \
-        && ! pvesm path "$HOOKSCRIPT_VOLID" >/dev/null 2>&1; then
+    if [ ! -f "/var/lib/vz/snippets/$(basename "${HOOKSCRIPT_VOLID#*:snippets/}")" ] &&
+        ! pvesm path "$HOOKSCRIPT_VOLID" >/dev/null 2>&1; then
         echo "Warning: hookscript $HOOKSCRIPT_VOLID not found. Copy" >&2
         echo "gha_runner_hookscript.sh into that storage's snippets directory" >&2
         echo "(e.g. /var/lib/vz/snippets/) before this container runs its first job," >&2
@@ -354,7 +355,7 @@ RUNNER_TOKEN=$(fetch_gh_token "runner registration token" -X POST \
 # there, rather than inlined into `pct exec ... bash -c "...$RUNNER_TOKEN..."`,
 # which would expose it in that process's argv via `ps` on the host.
 RUNNER_SETUP_SCRIPT=$(mktemp)
-cat > "$RUNNER_SETUP_SCRIPT" <<EOF
+cat >"$RUNNER_SETUP_SCRIPT" <<EOF
 #!/usr/bin/env bash
 set -e
 # Absolute path, not relative + cd: pct exec without --cwd starts the
@@ -366,11 +367,11 @@ mkdir -p /root/actions-runner && cd /root/actions-runner
 curl -fsS -o "$GITHUB_RUNNER_FILE" -L "$GITHUB_RUNNER_URL"
 EOF
 if [ -n "$GITHUB_RUNNER_SHA256" ]; then
-    cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
+    cat >>"$RUNNER_SETUP_SCRIPT" <<EOF
 echo "$GITHUB_RUNNER_SHA256  $GITHUB_RUNNER_FILE" | sha256sum -c -
 EOF
 fi
-cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
+cat >>"$RUNNER_SETUP_SCRIPT" <<EOF
 tar xzf "$GITHUB_RUNNER_FILE"
 if [ ! -x run.sh ]; then
     echo "FATAL: run.sh missing or not executable after tar extraction. Contents of actions-runner/:" >&2
@@ -381,7 +382,7 @@ fi
 EOF
 
 if [ "$EPHEMERAL_RUNNER" = "true" ]; then
-    cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
+    cat >>"$RUNNER_SETUP_SCRIPT" <<EOF
 RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --ephemeral --replace --url "$TARGET_URL" --token "$RUNNER_TOKEN"
 if [ ! -x run.sh ]; then
     echo "FATAL: run.sh missing or not executable after config.sh. Contents of actions-runner/:" >&2
@@ -418,7 +419,7 @@ if ! systemctl is-active --quiet gha-runner.service; then
 fi
 EOF
 else
-    cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
+    cat >>"$RUNNER_SETUP_SCRIPT" <<EOF
 RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --replace --url "$TARGET_URL" --token "$RUNNER_TOKEN"
 ./svc.sh install root
 ./svc.sh start
