@@ -24,5 +24,5 @@ OWNERREPO="myorg/myrepo"
 
 # Optional - all fall back to the same defaults as the main script if unset.
 # MAX_RUNNERS="3"
-# EXTRA_INSTALL_SCRIPT="/root/install-docker.sh"
+# EXTRA_INSTALL_SCRIPT="/root/scripts/install-docker.sh"
 # GITHUB_APP_INSTALLATION_ID=""

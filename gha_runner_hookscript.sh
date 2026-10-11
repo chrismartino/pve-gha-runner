@@ -54,7 +54,7 @@ VMID="$1"
 PHASE="$2"
 
 # --- CONFIG: fill this in ---
-MAIN_SCRIPT_PATH="/root/create-pve-lxc-gha-runner.sh"
+MAIN_SCRIPT_PATH="/root/scripts/create-pve-lxc-gha-runner.sh"
 # Per-repo config lives in $CONFIG_DIR/<slug>.conf - see step 3 above.
 CONFIG_DIR="/etc/gha-runner"
 # --- end config ---

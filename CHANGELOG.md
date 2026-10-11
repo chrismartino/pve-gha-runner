@@ -29,6 +29,8 @@ opt-in.
 
 ### Changed
 
+- The default location of the creation script is `/root/scripts/` rather than
+  `/root/`; set `MAIN_SCRIPT_PATH` in the hookscript if yours is elsewhere.
 - `OWNERREPO` and `GITHUB_ORG` are validated before use.
 - The hookscript validates the repo slug from the container tag before
   sourcing its config.

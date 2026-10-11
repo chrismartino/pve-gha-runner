@@ -90,12 +90,16 @@ You now have three values: the App ID, the path to the `.pem` key, and the
 ## 2. Install the script on the Proxmox host
 
 ```sh
-scp create-pve-lxc-gha-runner.sh root@<pve-host>:/root/
-ssh root@<pve-host> chmod +x /root/create-pve-lxc-gha-runner.sh
+ssh root@<pve-host> install -d -m 700 /root/scripts
+scp create-pve-lxc-gha-runner.sh root@<pve-host>:/root/scripts/
+ssh root@<pve-host> chmod +x /root/scripts/create-pve-lxc-gha-runner.sh
 ```
 
 (Or `git clone https://github.com/chrismartino/pve-gha-runner.git` directly
-on the host.)
+on the host and copy the scripts into `/root/scripts/` as shown under
+[Upgrading](#upgrading).) The examples below assume you are in that
+directory (`cd /root/scripts`). This is also where the hookscript looks for
+it by default (`MAIN_SCRIPT_PATH`).
 
 Tagged [releases](https://github.com/chrismartino/pve-gha-runner/releases)
 include the scripts, a source tarball and a `SHA256SUMS` file, with build
@@ -114,6 +118,7 @@ Creates one container that registers as a normal, long-lived runner (via
 `svc.sh install`) and keeps handling jobs until you remove it.
 
 ```sh
+cd /root/scripts
 ./create-pve-lxc-gha-runner.sh
 ```
 
@@ -145,9 +150,10 @@ without ever reusing container state between jobs.
    chmod 700 /var/lib/vz/snippets/gha_runner_hookscript.sh
    ```
 
-2. Put the creation script somewhere permanent (e.g. `/root/`). If it's not
-   at the default path, update `MAIN_SCRIPT_PATH` in the **CONFIG** block at
-   the top of `gha_runner_hookscript.sh`.
+2. Put the creation script somewhere permanent. The default is
+   `/root/scripts/create-pve-lxc-gha-runner.sh`; if it's elsewhere, update
+   `MAIN_SCRIPT_PATH` in the **CONFIG** block at the top of
+   `gha_runner_hookscript.sh`.
 
 3. For **each repo**, create a per-repo config file at
    `/etc/gha-runner/<slug>.conf`, where `<slug>` is `owner/repo` with `/`
@@ -259,7 +265,7 @@ host — it's pushed into the container and run once, before the runner
 registers:
 
 ```sh
-EXTRA_INSTALL_SCRIPT=/root/my-extra-deps.sh \
+EXTRA_INSTALL_SCRIPT=/root/scripts/my-extra-deps.sh \
 GITHUB_APP_ID=123456 \
 GITHUB_APP_PRIVATE_KEY_PATH=/root/my-app.private-key.pem \
 OWNERREPO=someorg/somerepo \
@@ -309,7 +315,8 @@ clone, check out the version you want and reinstall both scripts:
 
 ```sh
 git fetch --tags && git checkout <version>   # or: git pull
-install -m 700 create-pve-lxc-gha-runner.sh /root/
+install -d -m 700 /root/scripts
+install -m 700 create-pve-lxc-gha-runner.sh /root/scripts/
 install -m 700 gha_runner_hookscript.sh /var/lib/vz/snippets/
 ```
 
@@ -320,7 +327,7 @@ the previous version and run the two `install` commands again.
 To see which version is installed:
 
 ```sh
-/root/create-pve-lxc-gha-runner.sh --version
+/root/scripts/create-pve-lxc-gha-runner.sh --version
 grep -m1 '^VERSION=' /var/lib/vz/snippets/gha_runner_hookscript.sh
 ```
 
