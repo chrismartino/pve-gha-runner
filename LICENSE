@@ -2,8 +2,8 @@ MIT License
 
 Copyright (c) 2026 Chris Martino
 
-Portions derived from lxc_create_github_actions_runner.sh in
-https://github.com/oNaiPs/proxmox-scripts:
+Portions derived from lxc_create_github_actions_runner.sh in oNaiPs/proxmox-scripts
+https://github.com/oNaiPs/proxmox-scripts
 Copyright (c) 2023 José Luis Pereira
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
