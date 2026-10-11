@@ -315,7 +315,6 @@ clone, check out the version you want and reinstall both scripts:
 
 ```sh
 git fetch --tags && git checkout <version>   # or: git pull
-install -d -m 700 /root/scripts
 install -m 700 create-pve-lxc-gha-runner.sh /root/scripts/
 install -m 700 gha_runner_hookscript.sh /var/lib/vz/snippets/
 ```
