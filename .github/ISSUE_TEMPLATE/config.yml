@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or help setting up
+    url: https://github.com/chrismartino/pve-gha-runner/discussions
+    about: Ask in Discussions rather than opening an issue.
+  - name: Report a security vulnerability
+    url: https://github.com/chrismartino/pve-gha-runner/security/advisories/new
+    about: Report privately. Do not open a public issue.

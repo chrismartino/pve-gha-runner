@@ -1,0 +1,62 @@
+name: Bug report
+description: Something doesn't work as documented
+labels: [bug, needs-repro]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Redact** GitHub App IDs, private keys, tokens and hostnames from anything you paste.
+        For a security problem, use the private report link instead of this form.
+  - type: input
+    id: pve
+    attributes:
+      label: Proxmox VE version
+      description: Output of `pveversion`
+      placeholder: pve-manager/9.0.x
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options: [Persistent runner, Ephemeral pool, stop-and-cleanup script]
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options: [Repository, Organization]
+    validations:
+      required: true
+  - type: input
+    id: storage
+    attributes:
+      label: Container and template storage types
+      placeholder: "local-zfs (zfspool) / local (dir)"
+  - type: input
+    id: version
+    attributes:
+      label: Release or commit
+      placeholder: v0.1.0 or a commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact command and any environment variables you set (values redacted).
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Script output; for the ephemeral pool also `journalctl -t gha-runner-hook` and the repo's `recreate-<slug>.log`.
+      render: shell
