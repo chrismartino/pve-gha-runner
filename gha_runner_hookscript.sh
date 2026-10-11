@@ -46,6 +46,10 @@
 #
 set -u
 
+# Release version of these scripts. Set to the release version in the release
+# PR (see CONTRIBUTING.md); must match create-pve-lxc-gha-runner.sh.
+VERSION="0.1.0-dev"
+
 VMID="$1"
 PHASE="$2"
 
@@ -189,6 +193,13 @@ handle_poststop() {
 
     log "CT $VMID finished its job and powered off. Destroying and recreating."
 
+    # This file (in the snippets directory) and the creation script are installed
+    # separately, so they can end up on different versions. Warn, don't block.
+    MAIN_VERSION=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$MAIN_SCRIPT_PATH" 2>/dev/null | head -1)
+    if [ "${MAIN_VERSION:-unknown (older than 0.1.0)}" != "$VERSION" ]; then
+        log "WARNING: hookscript is $VERSION but $MAIN_SCRIPT_PATH is ${MAIN_VERSION:-unknown (older than 0.1.0)}. Update both (see README: Upgrading)."
+    fi
+
     # Even backgrounded, the outer stop task needs a moment to release its
     # PVE-level lock on $VMID, or the first attempt fails with "container is
     # running" instead of a ZFS-level error.
@@ -303,7 +314,7 @@ fi
 # tag lookup, sourcing the per-repo config) rather than depending on
 # anything from this process's environment, so a clean re-invocation just
 # works.
-log "post-stop received for CT $VMID, relaunching detached via systemd-run"
+log "post-stop received for CT $VMID (pve-gha-runner hookscript $VERSION), relaunching detached via systemd-run"
 if command -v systemd-run >/dev/null 2>&1; then
     systemd-run --quiet --collect \
         --unit="gha-runner-hook-${VMID}-$(date +%s)" \

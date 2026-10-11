@@ -32,6 +32,15 @@
 #   - The App ID and its private key (.pem) downloaded locally.
 #   - `openssl` available on the Proxmox host.
 #
+# Release version of these scripts. Set to the release version in the release
+# PR (see CONTRIBUTING.md); must match gha_runner_hookscript.sh. Print it
+# without running anything with: ./create-pve-lxc-gha-runner.sh --version
+VERSION="0.1.0-dev"
+if [ "${1:-}" = "--version" ]; then
+    echo "pve-gha-runner $VERSION"
+    exit 0
+fi
+
 set -e
 
 # Variables
@@ -102,6 +111,8 @@ fetch_gh_token() {
         delay=$((delay * 2))
     done
 }
+
+log "-- pve-gha-runner $VERSION"
 
 # GITHUB_SCOPE selects what the runner registers against:
 #   repo (default) - one repository, identified by OWNERREPO ("owner/repo").
