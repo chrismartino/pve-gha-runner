@@ -29,6 +29,28 @@ jobs:
             echo "::error::$TAG is not on main; refusing to release"
             exit 1
           fi
+      - name: Version must match the tag, both scripts and the changelog
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          want="${TAG#v}"
+          bad=0
+          for f in create-pve-lxc-gha-runner.sh gha_runner_hookscript.sh; do
+            have=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$f" | head -1)
+            echo "$f: ${have:-<missing>}"
+            if [ "$have" != "$want" ]; then
+              echo "::error file=$f::VERSION is '${have:-<missing>}', tag is '$TAG'"
+              bad=1
+            fi
+          done
+          # First versioned heading in the changelog ("## [1.2.3] - date"); "Unreleased" is skipped.
+          log=$(sed -n 's/^## \[\([0-9][^]]*\)\].*/\1/p' CHANGELOG.md | head -1)
+          echo "CHANGELOG.md: ${log:-<none>}"
+          if [ "$log" != "$want" ]; then
+            echo "::error file=CHANGELOG.md::latest released heading is '${log:-<none>}', tag is '$TAG'"
+            bad=1
+          fi
+          exit "$bad"
       - name: Build release assets
         env:
           TAG: ${{ github.ref_name }}

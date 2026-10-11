@@ -68,6 +68,24 @@ jobs:
             exit 1
           fi
 
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Both scripts carry the same VERSION
+        run: |
+          a=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' create-pve-lxc-gha-runner.sh | head -1)
+          b=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' gha_runner_hookscript.sh | head -1)
+          echo "create-pve-lxc-gha-runner.sh: ${a:-<missing>}"
+          echo "gha_runner_hookscript.sh:     ${b:-<missing>}"
+          if [ -z "$a" ] || [ "$a" != "$b" ]; then
+            echo "::error::VERSION is missing or differs between the two scripts"
+            exit 1
+          fi
+
   markdownlint:
     runs-on: ubuntu-latest
     timeout-minutes: 5
