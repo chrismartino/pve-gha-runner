@@ -12,6 +12,12 @@ general procedure is in the README's
 
 ## [Unreleased]
 
+### Fixed
+
+- The release workflow attaches its assets to a release that already exists
+  (for example one created from GitHub's "Draft a new release" page) instead
+  of failing.
+
 ## [1.2.0] - 2026-10-11
 
 **Upgrade:** no action needed for existing repo-level pools. Update both
