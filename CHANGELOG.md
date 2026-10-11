@@ -11,6 +11,7 @@ All notable changes are listed here. The format follows
   manual edit of the script).
 - GitHub Pages site, CI (shellcheck, shfmt, actionlint, zizmor, links),
   release workflow, and community files.
+- `.gitignore` for private keys (`*.pem`, `*.key`), `.env` files, and local configs.
 
 ### Changed
 
