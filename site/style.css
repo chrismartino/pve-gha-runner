@@ -1,0 +1,35 @@
+:root{--bg:#fff;--fg:#1f2937;--muted:#5b6472;--line:#e5e7eb;--card:#f8fafc;--accent:#b45309;--code-bg:#0f172a;--code-fg:#e2e8f0}
+@media (prefers-color-scheme:dark){:root{--bg:#0b1020;--fg:#e5e7eb;--muted:#9aa4b2;--line:#1f2a44;--card:#111936;--accent:#fbbf24;--code-bg:#050816;--code-fg:#e2e8f0}}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:var(--accent)}
+.wrap{max-width:860px;margin:0 auto;padding:0 16px}
+header.top{border-bottom:1px solid var(--line)}
+header.top .wrap{display:flex;justify-content:space-between;align-items:center;padding-top:14px;padding-bottom:14px;gap:12px;flex-wrap:wrap}
+.brand{font-weight:700;color:var(--fg);text-decoration:none}
+nav a{margin-left:16px;text-decoration:none;color:var(--muted);font-size:.95rem}
+nav a:hover{color:var(--accent)}
+.hero{padding:56px 0 32px}
+.hero h1{font-size:clamp(2rem,6vw,3rem);line-height:1.15;margin:0 0 16px}
+.hero p.lead{font-size:1.15rem;color:var(--muted);max-width:640px;margin:0 0 24px}
+.btn{display:inline-block;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:600;margin:0 8px 8px 0;border:1px solid var(--accent)}
+.btn.primary{background:var(--accent);color:#fff}
+@media (prefers-color-scheme:dark){.btn.primary{color:#111}}
+.btn.ghost{color:var(--accent)}
+section{padding:28px 0;border-top:1px solid var(--line)}
+h2{font-size:1.5rem;margin:0 0 12px}
+h3{font-size:1.05rem;margin:0 0 4px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-top:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+.card p{margin:0;color:var(--muted);font-size:.95rem}
+pre{background:var(--code-bg);color:var(--code-fg);padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:.9rem;line-height:1.5}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.92em}
+p code,li code,td code{background:var(--card);border:1px solid var(--line);padding:1px 5px;border-radius:4px}
+ol.steps{padding-left:20px}
+ol.steps li{margin-bottom:10px}
+table{border-collapse:collapse;width:100%;font-size:.95rem}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+.tablewrap{overflow-x:auto}
+.note{border-left:4px solid var(--accent);background:var(--card);padding:12px 16px;border-radius:0 8px 8px 0;margin:16px 0}
+footer{border-top:1px solid var(--line);padding:24px 0 40px;color:var(--muted);font-size:.9rem}
