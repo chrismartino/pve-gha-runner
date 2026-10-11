@@ -35,7 +35,7 @@
 # Release version of these scripts. Set to the release version in the release
 # PR (see CONTRIBUTING.md); must match gha_runner_hookscript.sh. Print it
 # without running anything with: ./create-pve-lxc-gha-runner.sh --version
-VERSION="0.1.0-dev"
+VERSION="1.2.0"
 if [ "${1:-}" = "--version" ]; then
     echo "pve-gha-runner $VERSION"
     exit 0

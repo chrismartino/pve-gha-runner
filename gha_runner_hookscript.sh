@@ -48,7 +48,7 @@ set -u
 
 # Release version of these scripts. Set to the release version in the release
 # PR (see CONTRIBUTING.md); must match create-pve-lxc-gha-runner.sh.
-VERSION="0.1.0-dev"
+VERSION="1.2.0"
 
 VMID="$1"
 PHASE="$2"
