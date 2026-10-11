@@ -89,7 +89,7 @@ for pass in $(seq 1 $MAX_PASSES); do
         if [ "$STATUS" = "running" ]; then
             log "   CT $ctid: stopping"
             pct stop "$ctid" >/dev/null 2>&1 || true
-            for i in $(seq 1 10); do
+            for _ in $(seq 1 10); do
                 STATUS=$(pct status "$ctid" 2>/dev/null | awk '{print $2}')
                 [ "$STATUS" != "running" ] && break
                 sleep 1

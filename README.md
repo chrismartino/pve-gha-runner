@@ -240,27 +240,30 @@ step 3 under [Ephemeral runner pool](#ephemeral-runner-pool-self-healing)).
 
 ## Organization-level runners
 
-By default the script requests a **repo-level** registration token. For an
-**org-level** runner:
+By default the script registers **repo-level** runners. For an **org-level**
+pool, set `GITHUB_SCOPE=org` and give the organization name instead of
+`OWNERREPO`:
 
-1. Grant the GitHub App the organization permission "Self-hosted runners:
-   Read and write" instead of the repo `Administration` permission.
-2. In `create-pve-lxc-gha-runner.sh`, change the registration-token request
-   URL from:
+1. Grant the GitHub App the **organization** permission "Self-hosted
+   runners: Read and write". This is narrower than the repo-level
+   `Administration` permission, so prefer it when you can.
+2. Install the App on the organization.
+3. Run the script (or the first ephemeral container) with the org scope:
 
+   ```sh
+   GITHUB_SCOPE=org \
+   GITHUB_ORG=someorg \
+   GITHUB_APP_ID=123456 \
+   GITHUB_APP_PRIVATE_KEY_PATH=/root/my-app.private-key.pem \
+   EPHEMERAL_RUNNER=true \
+   ./create-pve-lxc-gha-runner.sh
    ```
-   https://api.github.com/repos/$OWNERREPO/actions/runners/registration-token
-   ```
 
-   to:
-
-   ```
-   https://api.github.com/orgs/$ORG/actions/runners/registration-token
-   ```
-
-   (both the token-request URL and the `--url` passed to `config.sh` need
-   `$OWNERREPO` swapped for your org name — see the comments near the bottom
-   of the script).
+For the ephemeral pool's per-repo config, an org pool's file is named
+`/etc/gha-runner/org.<org>.conf` (org name lowercased) and sets
+`GITHUB_SCOPE="org"` and `GITHUB_ORG` instead of `OWNERREPO` — see
+[`examples/repo.conf.example`](examples/repo.conf.example). Containers are
+tagged `repo-org.<org>`, and `MAX_RUNNERS` applies per org.
 
 ## Configuration reference
 
@@ -274,6 +277,7 @@ Variables at the top of `create-pve-lxc-gha-runner.sh`:
 | `PCT_STORAGE` | `local-zfs` | Where the container's rootfs is provisioned. |
 | `TEMPL_STORAGE` | `local` | Where the Ubuntu template is downloaded (must support `vztmpl`; `local-zfs` usually doesn't). |
 | `MAX_RUNNERS` | `3` | Max concurrent `gha-runner-*` containers **for the given repo** (`repo-<slug>` tag), not a global cap across all repos. Env var. |
+| `GITHUB_SCOPE` | `repo` | `repo` (uses `OWNERREPO`) or `org` (uses `GITHUB_ORG`). Env var. See [Organization-level runners](#organization-level-runners). |
 | `EPHEMERAL_RUNNER` | `false` | Set `true` to use ephemeral mode. Env var. |
 | `EXTRA_INSTALL_SCRIPT` | (unset) | Path to a local script to run inside the container for extra dependencies. Env var. See [Installing extra dependencies](#installing-extra-dependencies). |
 | `HOOKSCRIPT_VOLID` | `local:snippets/gha_runner_hookscript.sh` | Proxmox volid of the hookscript; only used when `EPHEMERAL_RUNNER=true`. |

@@ -20,7 +20,9 @@
 #    /etc/gha-runner/<slug>.conf (slug = owner/repo with "/" -> "-", e.g.
 #    /etc/gha-runner/myorg-myrepo.conf), setting GITHUB_APP_ID,
 #    GITHUB_APP_PRIVATE_KEY_PATH, OWNERREPO, and optionally MAX_RUNNERS /
-#    EXTRA_INSTALL_SCRIPT for that repo. See examples/repo.conf.example.
+#    EXTRA_INSTALL_SCRIPT for that repo. For an org-level pool set
+#    GITHUB_SCOPE="org" and GITHUB_ORG instead of OWNERREPO; its file is
+#    /etc/gha-runner/org.<org>.conf (lowercased). See examples/repo.conf.example.
 #    Each private key path must be readable by root only. This hookscript
 #    file is shared across all repos - it reads back the "repo-<slug>" tag
 #    (set by the main script at container creation) to know which repo a
@@ -106,6 +108,13 @@ if [ -z "$REPO_SLUG" ]; then
     exit 0
 fi
 
+# The slug becomes part of a file path that is then sourced as root, so only
+# accept what the main script can produce (Proxmox tag characters).
+if ! [[ "$REPO_SLUG" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+    log "post-stop fired for CT $VMID but repo slug '$REPO_SLUG' has unexpected characters - ignoring"
+    exit 0
+fi
+
 REPO_CONF="$CONFIG_DIR/$REPO_SLUG.conf"
 if [ ! -f "$REPO_CONF" ]; then
     log "post-stop fired for CT $VMID (repo slug: $REPO_SLUG) but no config at $REPO_CONF - ignoring"
@@ -113,8 +122,18 @@ if [ ! -f "$REPO_CONF" ]; then
 fi
 # shellcheck source=/dev/null
 . "$REPO_CONF"
-if [ -z "${GITHUB_APP_ID:-}" ] || [ -z "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ] || [ -z "${OWNERREPO:-}" ]; then
-    log "ERROR: $REPO_CONF is missing GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, or OWNERREPO - refusing to act on CT $VMID"
+GITHUB_SCOPE="${GITHUB_SCOPE:-repo}"
+if [ -z "${GITHUB_APP_ID:-}" ] || [ -z "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ]; then
+    log "ERROR: $REPO_CONF is missing GITHUB_APP_ID or GITHUB_APP_PRIVATE_KEY_PATH - refusing to act on CT $VMID"
+    exit 1
+fi
+if [ "$GITHUB_SCOPE" = "org" ]; then
+    if [ -z "${GITHUB_ORG:-}" ]; then
+        log "ERROR: $REPO_CONF sets GITHUB_SCOPE=org but not GITHUB_ORG - refusing to act on CT $VMID"
+        exit 1
+    fi
+elif [ -z "${OWNERREPO:-}" ]; then
+    log "ERROR: $REPO_CONF is missing OWNERREPO - refusing to act on CT $VMID"
     exit 1
 fi
 MAX_RUNNERS="${MAX_RUNNERS:-3}"
@@ -250,7 +269,9 @@ fi
 export EPHEMERAL_RUNNER=true
 export GITHUB_APP_ID
 export GITHUB_APP_PRIVATE_KEY_PATH
-export OWNERREPO
+export GITHUB_SCOPE
+[ -n "${OWNERREPO:-}" ] && export OWNERREPO
+[ -n "${GITHUB_ORG:-}" ] && export GITHUB_ORG
 export MAX_RUNNERS
 [ -n "${EXTRA_INSTALL_SCRIPT:-}" ] && export EXTRA_INSTALL_SCRIPT
 [ -n "${GITHUB_APP_INSTALLATION_ID:-}" ] && export GITHUB_APP_INSTALLATION_ID

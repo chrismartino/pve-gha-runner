@@ -17,6 +17,11 @@ GITHUB_APP_ID=""
 GITHUB_APP_PRIVATE_KEY_PATH=""
 OWNERREPO="myorg/myrepo"
 
+# Org-level pool instead of a single repo: set these two instead of
+# OWNERREPO, and name the file /etc/gha-runner/org.<org>.conf (lowercased).
+# GITHUB_SCOPE="org"
+# GITHUB_ORG="myorg"
+
 # Optional - all fall back to the same defaults as the main script if unset.
 # MAX_RUNNERS="3"
 # EXTRA_INSTALL_SCRIPT="/root/install-docker.sh"
