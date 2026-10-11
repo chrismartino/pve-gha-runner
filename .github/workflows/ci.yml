@@ -26,7 +26,7 @@ jobs:
         with:
           persist-credentials: false
       - name: shellcheck
-        run: shellcheck --version && shellcheck -S style ./*.sh examples/*.sh .github/maintainer/*.sh
+        run: shellcheck --version && shellcheck -S style ./*.sh examples/*.sh
 
   shfmt:
     runs-on: ubuntu-latest
@@ -39,7 +39,7 @@ jobs:
         run: GOBIN="$RUNNER_TEMP/bin" go install "mvdan.cc/sh/v3/cmd/shfmt@${SHFMT_VERSION}"
       - name: shfmt
         run: |
-          "$RUNNER_TEMP/bin/shfmt" -d -i 4 -ci ./*.sh examples/*.sh .github/maintainer/*.sh
+          "$RUNNER_TEMP/bin/shfmt" -d -i 4 -ci ./*.sh examples/*.sh
 
   syntax:
     runs-on: ubuntu-latest
@@ -50,7 +50,7 @@ jobs:
           persist-credentials: false
       - name: bash -n
         run: |
-          for f in ./*.sh examples/*.sh .github/maintainer/*.sh; do
+          for f in ./*.sh examples/*.sh; do
             echo "bash -n $f"
             bash -n "$f"
           done

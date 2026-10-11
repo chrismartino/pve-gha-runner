@@ -27,8 +27,8 @@ logs.
 CI runs these on every PR; run them locally first:
 
 ```sh
-shellcheck -S style *.sh examples/*.sh .github/maintainer/*.sh
-shfmt -d -i 4 -ci *.sh examples/*.sh .github/maintainer/*.sh   # see .editorconfig
+shellcheck -S style *.sh examples/*.sh
+shfmt -d -i 4 -ci *.sh examples/*.sh   # see .editorconfig
 bash -n create-pve-lxc-gha-runner.sh gha_runner_hookscript.sh stop-and-cleanup-gha-runners.sh
 ```
 
