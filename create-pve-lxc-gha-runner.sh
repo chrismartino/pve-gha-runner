@@ -26,13 +26,21 @@
 # Prerequisites:
 #   - A GitHub App with Repository permission "Administration: Read and
 #     write" (grants access to the runner registration-token endpoint). For
-#     org-level runners instead of repo-level, use the Organization
-#     permission "Self-hosted runners: Read and write" instead and swap the
-#     registration-token URL below from /repos/$OWNERREPO/... to /orgs/$ORG/...
+#     org-level runners (GITHUB_SCOPE=org) use the Organization permission
+#     "Self-hosted runners: Read and write" instead - it is narrower.
 #   - The App installed on the target repo (or org).
 #   - The App ID and its private key (.pem) downloaded locally.
 #   - `openssl` available on the Proxmox host.
 #
+# Release version of these scripts. Set to the release version in the release
+# PR (see CONTRIBUTING.md); must match gha_runner_hookscript.sh. Print it
+# without running anything with: ./create-pve-lxc-gha-runner.sh --version
+VERSION="0.1.0-dev"
+if [ "${1:-}" = "--version" ]; then
+    echo "pve-gha-runner $VERSION"
+    exit 0
+fi
+
 set -e
 
 # Variables
@@ -82,7 +90,8 @@ log() {
 # Prints the token on success; on exhausted retries, prints the last
 # response to stderr and returns non-zero.
 fetch_gh_token() {
-    local desc="$1"; shift
+    local desc="$1"
+    shift
     local max_attempts=5 attempt=1 delay=3
     local res token
     while [ "$attempt" -le "$max_attempts" ]; do
@@ -103,16 +112,55 @@ fetch_gh_token() {
     done
 }
 
-# OWNERREPO is needed up front (before the App/JWT prompts below) so
-# MAX_RUNNERS can be checked per-repo: multiple repos each get their own pool
-# via a "repo-<slug>" tag on the container, rather than sharing one global
-# count of all gha-runner-* containers.
-if [ -z "$OWNERREPO" ]; then
-    read -r -p "Enter github owner/repo: " OWNERREPO
-    echo
-fi
-# Proxmox tags allow [a-z0-9_.-] - lowercase and swap "/" for "-".
-REPO_SLUG=$(echo "$OWNERREPO" | tr '[:upper:]' '[:lower:]' | tr '/' '-')
+log "-- pve-gha-runner $VERSION"
+
+# GITHUB_SCOPE selects what the runner registers against:
+#   repo (default) - one repository, identified by OWNERREPO ("owner/repo").
+#   org            - an organization, identified by GITHUB_ORG. Needs the App's
+#                    Organization permission "Self-hosted runners: Read and
+#                    write" rather than the repo "Administration" permission.
+# The target is needed up front (before the App/JWT prompts below) so
+# MAX_RUNNERS can be checked per target: each target gets its own pool via a
+# "repo-<slug>" tag on the container, rather than sharing one global count of
+# all gha-runner-* containers.
+GITHUB_SCOPE="${GITHUB_SCOPE:-repo}"
+case "$GITHUB_SCOPE" in
+    repo)
+        if [ -z "${OWNERREPO:-}" ]; then
+            read -r -p "Enter github owner/repo: " OWNERREPO
+            echo
+        fi
+        if ! [[ "$OWNERREPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo "OWNERREPO must look like owner/repo, got: $OWNERREPO" >&2
+            exit 1
+        fi
+        TARGET="$OWNERREPO"
+        TARGET_API="repos/$OWNERREPO"
+        TARGET_URL="https://github.com/$OWNERREPO"
+        # Proxmox tags allow [a-z0-9_.-] - lowercase and swap "/" for "-".
+        REPO_SLUG=$(echo "$OWNERREPO" | tr '[:upper:]' '[:lower:]' | tr '/' '-')
+        ;;
+    org)
+        if [ -z "${GITHUB_ORG:-}" ]; then
+            read -r -p "Enter github organization: " GITHUB_ORG
+            echo
+        fi
+        if ! [[ "$GITHUB_ORG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "GITHUB_ORG must be an organization name, got: $GITHUB_ORG" >&2
+            exit 1
+        fi
+        TARGET="$GITHUB_ORG"
+        TARGET_API="orgs/$GITHUB_ORG"
+        TARGET_URL="https://github.com/$GITHUB_ORG"
+        # GitHub owner names can't contain ".", so an "org." prefix can never
+        # collide with a repo slug ("owner-repo").
+        REPO_SLUG="org.$(echo "$GITHUB_ORG" | tr '[:upper:]' '[:lower:]')"
+        ;;
+    *)
+        echo "GITHUB_SCOPE must be 'repo' or 'org', got: $GITHUB_SCOPE" >&2
+        exit 1
+        ;;
+esac
 
 RUNNING_RUNNERS=0
 for ctid in $(pct list 2>/dev/null | awk 'NR>1 && $NF ~ /^gha-runner-/ {print $1}'); do
@@ -124,7 +172,7 @@ for ctid in $(pct list 2>/dev/null | awk 'NR>1 && $NF ~ /^gha-runner-/ {print $1
     esac
 done
 if [ "$RUNNING_RUNNERS" -ge "$MAX_RUNNERS" ]; then
-    log "Already at MAX_RUNNERS ($MAX_RUNNERS) for $OWNERREPO: found $RUNNING_RUNNERS existing gha-runner-* container(s) tagged repo-$REPO_SLUG. Not creating another."
+    log "Already at MAX_RUNNERS ($MAX_RUNNERS) for $TARGET: found $RUNNING_RUNNERS existing gha-runner-* container(s) tagged repo-$REPO_SLUG. Not creating another."
     exit 0
 fi
 
@@ -139,8 +187,8 @@ RUNNER_TAG=$(echo "$RUNNER_RELEASE_JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"
 RUNNER_VERSION="${RUNNER_TAG#v}"
 GITHUB_RUNNER_FILE="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
 GITHUB_RUNNER_URL="https://github.com/actions/runner/releases/download/${RUNNER_TAG}/${GITHUB_RUNNER_FILE}"
-GITHUB_RUNNER_SHA256=$(echo "$RUNNER_RELEASE_JSON" | grep -A30 "\"name\": \"$GITHUB_RUNNER_FILE\"" \
-    | grep -m1 '"digest"' | sed -E 's/.*"digest": *"sha256:([a-f0-9]+)".*/\1/' || true)
+GITHUB_RUNNER_SHA256=$(echo "$RUNNER_RELEASE_JSON" | grep -A30 "\"name\": \"$GITHUB_RUNNER_FILE\"" |
+    grep -m1 '"digest"' | sed -E 's/.*"digest": *"sha256:([a-f0-9]+)".*/\1/' || true)
 
 if [ -z "$RUNNER_VERSION" ]; then
     echo "Could not resolve the latest actions/runner release version." >&2
@@ -153,12 +201,12 @@ log "-- Using runner $RUNNER_TAG"
 
 # --- GitHub App inputs (instead of GITHUB_TOKEN) ---
 
-if [ -z "$GITHUB_APP_ID" ]; then
+if [ -z "${GITHUB_APP_ID:-}" ]; then
     read -r -p "Enter GitHub App ID: " GITHUB_APP_ID
     echo
 fi
 
-if [ -z "$GITHUB_APP_PRIVATE_KEY_PATH" ]; then
+if [ -z "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ]; then
     read -r -p "Enter path to GitHub App private key (.pem): " GITHUB_APP_PRIVATE_KEY_PATH
     echo
 fi
@@ -183,8 +231,8 @@ b64url() {
 generate_app_jwt() {
     local now iat exp header payload header_b64 payload_b64 signature
     now=$(date +%s)
-    iat=$((now - 60))     # allow for clock drift
-    exp=$((now + 540))    # GitHub's max is 10 minutes; use 9 to be safe
+    iat=$((now - 60))  # allow for clock drift
+    exp=$((now + 540)) # GitHub's max is 10 minutes; use 9 to be safe
 
     header='{"alg":"RS256","typ":"JWT"}'
     payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$iat" "$exp" "$GITHUB_APP_ID")
@@ -201,20 +249,20 @@ APP_JWT=$(generate_app_jwt)
 
 # --- Resolve installation ID for this repo (unless already provided) ---
 
-if [ -z "$GITHUB_APP_INSTALLATION_ID" ]; then
-    log "-- Looking up installation ID for $OWNERREPO"
+if [ -z "${GITHUB_APP_INSTALLATION_ID:-}" ]; then
+    log "-- Looking up installation ID for $TARGET"
     INSTALL_RES=$(curl -sS \
         -H "Authorization: Bearer $APP_JWT" \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
-        "https://api.github.com/repos/$OWNERREPO/installation")
+        "https://api.github.com/$TARGET_API/installation")
     # `|| true`: under `set -e`, VAR=$(cmd | grep ...) aborts silently if
     # grep finds nothing, since the assignment's exit status follows the
     # pipeline's last command. The check below only runs because of this.
     GITHUB_APP_INSTALLATION_ID=$(echo "$INSTALL_RES" | grep -o '"id": *[0-9]*' | head -1 | grep -o '[0-9]*' || true)
 
     if [ -z "$GITHUB_APP_INSTALLATION_ID" ]; then
-        echo "Could not find an installation of this App on $OWNERREPO. Is it installed there?" >&2
+        echo "Could not find an installation of this App on $TARGET. Is it installed there?" >&2
         echo "$INSTALL_RES" >&2
         exit 1
     fi
@@ -237,8 +285,8 @@ PCTID=$(pvesh get /cluster/nextid)
 
 # pveam checksum-verifies against Proxmox's manifest; a raw curl download doesn't.
 log "-- Downloading $TEMPL_FILE template..."
-if command -v pveam >/dev/null 2>&1 && pveam update >/dev/null 2>&1 \
-    && pveam available --section system 2>/dev/null | grep -q "$TEMPL_FILE"; then
+if command -v pveam >/dev/null 2>&1 && pveam update >/dev/null 2>&1 &&
+    pveam available --section system 2>/dev/null | grep -q "$TEMPL_FILE"; then
     pveam download "$TEMPL_STORAGE" "$TEMPL_FILE"
     TEMPL_FILE_PATH="/var/lib/vz/template/cache/$TEMPL_FILE"
     [ -f "$TEMPL_FILE_PATH" ] || TEMPL_FILE_PATH=$(pvesm path "$TEMPL_STORAGE:vztmpl/$TEMPL_FILE" 2>/dev/null || echo "$TEMPL_FILE")
@@ -255,16 +303,16 @@ fi
 # have. Leave Docker on overlay2.
 log "-- Creating LXC container with ID:$PCTID"
 PCT_CREATE_ARGS=(
-    -arch $PCT_ARCH
+    -arch "$PCT_ARCH"
     -ostype ubuntu
     -unprivileged 1
     -hostname "gha-runner-$PCTID"
-    -cores $PCT_CORES
-    -memory $PCT_MEMORY
-    -swap $PCT_SWAP
-    -storage $PCT_STORAGE
-    -features nesting=1,keyctl=1,fuse=1
-    -net0 name=eth0,bridge=vmbr0,ip=dhcp,type=veth
+    -cores "$PCT_CORES"
+    -memory "$PCT_MEMORY"
+    -swap "$PCT_SWAP"
+    -storage "$PCT_STORAGE"
+    -features "nesting=1,keyctl=1,fuse=1"
+    -net0 "name=eth0,bridge=vmbr0,ip=dhcp,type=veth"
     # "repo-<slug>" lets one hookscript serve multiple repos: it reads this
     # tag back at post-stop time to know which repo/App config to use,
     # instead of having a single repo hardcoded in the hookscript file.
@@ -273,8 +321,8 @@ PCT_CREATE_ARGS=(
     -tags "gha-runner;repo-$REPO_SLUG"
 )
 if [ "$EPHEMERAL_RUNNER" = "true" ]; then
-    if [ ! -f "/var/lib/vz/snippets/$(basename "${HOOKSCRIPT_VOLID#*:snippets/}")" ] \
-        && ! pvesm path "$HOOKSCRIPT_VOLID" >/dev/null 2>&1; then
+    if [ ! -f "/var/lib/vz/snippets/$(basename "${HOOKSCRIPT_VOLID#*:snippets/}")" ] &&
+        ! pvesm path "$HOOKSCRIPT_VOLID" >/dev/null 2>&1; then
         echo "Warning: hookscript $HOOKSCRIPT_VOLID not found. Copy" >&2
         echo "gha_runner_hookscript.sh into that storage's snippets directory" >&2
         echo "(e.g. /var/lib/vz/snippets/) before this container runs its first job," >&2
@@ -285,7 +333,7 @@ fi
 pct create "$PCTID" "$TEMPL_FILE_PATH" "${PCT_CREATE_ARGS[@]}"
 
 log "-- Resizing container to $PCTSIZE"
-pct resize "$PCTID" rootfs $PCTSIZE
+pct resize "$PCTID" rootfs "$PCTSIZE"
 
 log "-- Starting container"
 pct start "$PCTID"
@@ -305,13 +353,11 @@ if [ -n "$EXTRA_INSTALL_SCRIPT" ]; then
 fi
 
 log "-- Getting runner installation token"
-# Org-level runner instead of repo-level: swap for
-# https://api.github.com/orgs/$ORG/actions/runners/registration-token
 RUNNER_TOKEN=$(fetch_gh_token "runner registration token" -X POST \
     -H "Accept: application/vnd.github+json" \
     -H "Authorization: Bearer $INSTALLATION_TOKEN" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/repos/$OWNERREPO/actions/runners/registration-token") || {
+    "https://api.github.com/$TARGET_API/actions/runners/registration-token") || {
     echo "Failed to obtain runner registration token after retries." >&2
     exit 1
 }
@@ -320,7 +366,7 @@ RUNNER_TOKEN=$(fetch_gh_token "runner registration token" -X POST \
 # there, rather than inlined into `pct exec ... bash -c "...$RUNNER_TOKEN..."`,
 # which would expose it in that process's argv via `ps` on the host.
 RUNNER_SETUP_SCRIPT=$(mktemp)
-cat > "$RUNNER_SETUP_SCRIPT" <<EOF
+cat >"$RUNNER_SETUP_SCRIPT" <<EOF
 #!/usr/bin/env bash
 set -e
 # Absolute path, not relative + cd: pct exec without --cwd starts the
@@ -332,11 +378,11 @@ mkdir -p /root/actions-runner && cd /root/actions-runner
 curl -fsS -o "$GITHUB_RUNNER_FILE" -L "$GITHUB_RUNNER_URL"
 EOF
 if [ -n "$GITHUB_RUNNER_SHA256" ]; then
-    cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
+    cat >>"$RUNNER_SETUP_SCRIPT" <<EOF
 echo "$GITHUB_RUNNER_SHA256  $GITHUB_RUNNER_FILE" | sha256sum -c -
 EOF
 fi
-cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
+cat >>"$RUNNER_SETUP_SCRIPT" <<EOF
 tar xzf "$GITHUB_RUNNER_FILE"
 if [ ! -x run.sh ]; then
     echo "FATAL: run.sh missing or not executable after tar extraction. Contents of actions-runner/:" >&2
@@ -347,8 +393,8 @@ fi
 EOF
 
 if [ "$EPHEMERAL_RUNNER" = "true" ]; then
-    cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
-RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --ephemeral --replace --url "https://github.com/$OWNERREPO" --token "$RUNNER_TOKEN"
+    cat >>"$RUNNER_SETUP_SCRIPT" <<EOF
+RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --ephemeral --replace --url "$TARGET_URL" --token "$RUNNER_TOKEN"
 if [ ! -x run.sh ]; then
     echo "FATAL: run.sh missing or not executable after config.sh. Contents of actions-runner/:" >&2
     ls -la >&2
@@ -384,8 +430,8 @@ if ! systemctl is-active --quiet gha-runner.service; then
 fi
 EOF
 else
-    cat >> "$RUNNER_SETUP_SCRIPT" <<EOF
-RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --replace --url "https://github.com/$OWNERREPO" --token "$RUNNER_TOKEN"
+    cat >>"$RUNNER_SETUP_SCRIPT" <<EOF
+RUNNER_ALLOW_RUNASROOT=1 ./config.sh --unattended --replace --url "$TARGET_URL" --token "$RUNNER_TOKEN"
 ./svc.sh install root
 ./svc.sh start
 EOF
@@ -405,7 +451,7 @@ if [ "$TEMPL_FILE_PATH" = "$TEMPL_FILE" ]; then
     rm -f "$TEMPL_FILE"
 fi
 
-log "-- Done. Container $PCTID is registered as a runner for $OWNERREPO."
+log "-- Done. Container $PCTID is registered as a runner for $TARGET."
 if [ "$EPHEMERAL_RUNNER" = "true" ]; then
     log "-- Ephemeral mode: it will power off after one job and, if the"
     log "   hookscript is in place, recreate itself automatically."

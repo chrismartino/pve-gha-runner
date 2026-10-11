@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>pve-gha-runner: GitHub Actions runners on Proxmox LXC</title>
+<meta name="description" content="Shell scripts that create and manage self-hosted GitHub Actions runners as unprivileged LXC containers on Proxmox VE, either persistent or as a self-healing pool of ephemeral one-job runners.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top"><div class="wrap">
+  <a class="brand" href="./">pve-gha-runner</a>
+  <nav>
+    <a href="#how">How it works</a>
+    <a href="#start">Quick start</a>
+    <a href="#security">Security</a>
+    <a href="https://github.com/chrismartino/pve-gha-runner">GitHub</a>
+  </nav>
+</div></header>
+
+<main class="wrap">
+<div class="hero">
+  <h1>Self-hosted GitHub Actions runners on Proxmox, one LXC per job.</h1>
+  <p class="lead">Shell scripts that create unprivileged Ubuntu 24.04 LXC containers on Proxmox VE and register them as GitHub Actions runners. Run a single persistent runner, or a self-healing pool where every job gets a fresh container.</p>
+  <a class="btn primary" href="#start">Get started</a>
+  <a class="btn ghost" href="https://github.com/chrismartino/pve-gha-runner">View on GitHub</a>
+</div>
+
+<section id="features">
+  <h2>Features</h2>
+  <div class="grid">
+    <div class="card"><h3>Ephemeral pool</h3><p>Each runner registers with <code>--ephemeral</code>, runs exactly one job, powers off, and is destroyed and replaced. No state carries between jobs.</p></div>
+    <div class="card"><h3>GitHub App auth</h3><p>Signs a short-lived JWT, exchanges it for an installation token, and requests the registration token. No long-lived PAT is stored or passed into containers.</p></div>
+    <div class="card"><h3>Unprivileged containers</h3><p>Built for Proxmox VE 9 (LXC 6, cgroup v2) so Docker can work inside unprivileged containers.</p></div>
+    <div class="card"><h3>Multi-repo</h3><p>One hookscript serves every repo. Each container is tagged <code>repo-&lt;slug&gt;</code> and reads its own config, with a per-repo <code>MAX_RUNNERS</code> cap.</p></div>
+    <div class="card"><h3>Extra dependencies</h3><p>Point <code>EXTRA_INSTALL_SCRIPT</code> at a script to install Docker or any CLIs your jobs need. An example is included.</p></div>
+    <div class="card"><h3>Verified runner download</h3><p>Resolves the latest <code>actions/runner</code> release at run time and checks it against GitHub's published SHA-256 when available.</p></div>
+  </div>
+</section>
+
+<section id="how">
+  <h2>How the ephemeral pool works</h2>
+  <ol class="steps">
+    <li>The create script builds an LXC container, installs the runner, and registers it with <code>--ephemeral</code>.</li>
+    <li>A one-shot systemd unit runs the job, then powers the container off.</li>
+    <li>The Proxmox post-stop hookscript destroys the container and runs the create script again for its replacement.</li>
+    <li>A per-container flap guard stops a broken registration from respawning in a loop.</li>
+  </ol>
+  <p>A persistent mode is also available: one long-lived container installed with <code>svc.sh</code>.</p>
+</section>
+
+<section id="start">
+  <h2>Quick start</h2>
+  <p>You need Proxmox VE 9, <code>openssl</code> and <code>curl</code> on the host, and a <a href="https://github.com/chrismartino/pve-gha-runner#1-create-a-github-app">GitHub App</a> installed on your repository.</p>
+  <pre><code>git clone https://github.com/chrismartino/pve-gha-runner.git
+cd pve-gha-runner
+
+# Persistent runner
+./create-pve-lxc-gha-runner.sh
+
+# First container of an ephemeral pool
+EPHEMERAL_RUNNER=true \
+GITHUB_APP_ID=123456 \
+GITHUB_APP_PRIVATE_KEY_PATH=/root/my-app.private-key.pem \
+OWNERREPO=someorg/somerepo \
+./create-pve-lxc-gha-runner.sh</code></pre>
+  <p>Ephemeral mode also needs the hookscript copied to a <code>snippets</code> storage and a per-repo config in <code>/etc/gha-runner/</code>. The <a href="https://github.com/chrismartino/pve-gha-runner#ephemeral-runner-pool-self-healing">README</a> has the full steps.</p>
+</section>
+
+<section id="config">
+  <h2>Common settings</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td data-label="Variable"><code>EPHEMERAL_RUNNER</code></td><td data-label="Default"><code>false</code></td><td data-label="Purpose">Use one-job-per-container mode.</td></tr>
+      <tr><td data-label="Variable"><code>MAX_RUNNERS</code></td><td data-label="Default"><code>3</code></td><td data-label="Purpose">Max concurrent runners per repo.</td></tr>
+      <tr><td data-label="Variable"><code>EXTRA_INSTALL_SCRIPT</code></td><td data-label="Default">unset</td><td data-label="Purpose">Script to run inside the container before registration.</td></tr>
+      <tr><td data-label="Variable"><code>PCT_STORAGE</code></td><td data-label="Default"><code>local-zfs</code></td><td data-label="Purpose">Storage for the container rootfs.</td></tr>
+      <tr><td data-label="Variable"><code>PCT_CORES</code> / <code>PCT_MEMORY</code></td><td data-label="Default"><code>4</code> / <code>4096</code></td><td data-label="Purpose">Container resources.</td></tr>
+    </tbody>
+  </table></div>
+  <p>See the <a href="https://github.com/chrismartino/pve-gha-runner#configuration-reference">configuration reference</a> for every option.</p>
+</section>
+
+<section id="security">
+  <h2>Security notes</h2>
+  <div class="note"><strong>Use these runners with private repositories.</strong> On a public repository, a pull request from a fork can run arbitrary code on a self-hosted runner. Ephemeral containers limit the damage but do not make that safe.</div>
+  <ul>
+    <li>The App's private key stays on the Proxmox host and is never copied into a container.</li>
+    <li>The registration token is pushed in as a file, so it does not appear in host <code>ps</code> output.</li>
+    <li>The scripts run as root on your Proxmox host. Read them before you run them.</li>
+  </ul>
+  <p>To report a vulnerability, use the repository's <a href="https://github.com/chrismartino/pve-gha-runner/security">Security tab</a>.</p>
+</section>
+</main>
+
+<footer><div class="wrap">
+  MIT licensed. Adapted from <a href="https://github.com/oNaiPs/proxmox-scripts">oNaiPs/proxmox-scripts</a>.
+  Source and docs on <a href="https://github.com/chrismartino/pve-gha-runner">GitHub</a>.
+</div></footer>
+</body>
+</html>

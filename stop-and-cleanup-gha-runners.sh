@@ -45,8 +45,11 @@ log "-- About to stop and destroy (--purge) these containers:$TARGETS"
 if [ "$FORCE" != "true" ]; then
     read -r -p "Proceed? [y/N] " CONFIRM
     case "$CONFIRM" in
-        y|Y|yes|YES) ;;
-        *) log "-- Aborted."; exit 1 ;;
+        y | Y | yes | YES) ;;
+        *)
+            log "-- Aborted."
+            exit 1
+            ;;
     esac
 fi
 
@@ -89,7 +92,7 @@ for pass in $(seq 1 $MAX_PASSES); do
         if [ "$STATUS" = "running" ]; then
             log "   CT $ctid: stopping"
             pct stop "$ctid" >/dev/null 2>&1 || true
-            for i in $(seq 1 10); do
+            for _ in $(seq 1 10); do
                 STATUS=$(pct status "$ctid" 2>/dev/null | awk '{print $2}')
                 [ "$STATUS" != "running" ] && break
                 sleep 1

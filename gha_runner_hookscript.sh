@@ -20,7 +20,9 @@
 #    /etc/gha-runner/<slug>.conf (slug = owner/repo with "/" -> "-", e.g.
 #    /etc/gha-runner/myorg-myrepo.conf), setting GITHUB_APP_ID,
 #    GITHUB_APP_PRIVATE_KEY_PATH, OWNERREPO, and optionally MAX_RUNNERS /
-#    EXTRA_INSTALL_SCRIPT for that repo. See examples/repo.conf.example.
+#    EXTRA_INSTALL_SCRIPT for that repo. For an org-level pool set
+#    GITHUB_SCOPE="org" and GITHUB_ORG instead of OWNERREPO; its file is
+#    /etc/gha-runner/org.<org>.conf (lowercased). See examples/repo.conf.example.
 #    Each private key path must be readable by root only. This hookscript
 #    file is shared across all repos - it reads back the "repo-<slug>" tag
 #    (set by the main script at container creation) to know which repo a
@@ -44,17 +46,21 @@
 #
 set -u
 
+# Release version of these scripts. Set to the release version in the release
+# PR (see CONTRIBUTING.md); must match create-pve-lxc-gha-runner.sh.
+VERSION="0.1.0-dev"
+
 VMID="$1"
 PHASE="$2"
 
 # --- CONFIG: fill this in ---
-MAIN_SCRIPT_PATH="/root/create-pve-lxc-gha-runner.sh"
+MAIN_SCRIPT_PATH="/root/scripts/create-pve-lxc-gha-runner.sh"
 # Per-repo config lives in $CONFIG_DIR/<slug>.conf - see step 3 above.
 CONFIG_DIR="/etc/gha-runner"
 # --- end config ---
 
 STATE_DIR="/var/lib/gha-runner-hook"
-MIN_RECREATE_INTERVAL=60  # seconds - flap guard, see below
+MIN_RECREATE_INTERVAL=60 # seconds - flap guard, see below
 
 # Marker used to re-invoke this file via systemd-run instead of a real phase.
 DETACHED_MARKER="__gha_detached_post_stop__"
@@ -106,6 +112,13 @@ if [ -z "$REPO_SLUG" ]; then
     exit 0
 fi
 
+# The slug becomes part of a file path that is then sourced as root, so only
+# accept what the main script can produce (Proxmox tag characters).
+if ! [[ "$REPO_SLUG" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+    log "post-stop fired for CT $VMID but repo slug '$REPO_SLUG' has unexpected characters - ignoring"
+    exit 0
+fi
+
 REPO_CONF="$CONFIG_DIR/$REPO_SLUG.conf"
 if [ ! -f "$REPO_CONF" ]; then
     log "post-stop fired for CT $VMID (repo slug: $REPO_SLUG) but no config at $REPO_CONF - ignoring"
@@ -113,8 +126,18 @@ if [ ! -f "$REPO_CONF" ]; then
 fi
 # shellcheck source=/dev/null
 . "$REPO_CONF"
-if [ -z "${GITHUB_APP_ID:-}" ] || [ -z "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ] || [ -z "${OWNERREPO:-}" ]; then
-    log "ERROR: $REPO_CONF is missing GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, or OWNERREPO - refusing to act on CT $VMID"
+GITHUB_SCOPE="${GITHUB_SCOPE:-repo}"
+if [ -z "${GITHUB_APP_ID:-}" ] || [ -z "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ]; then
+    log "ERROR: $REPO_CONF is missing GITHUB_APP_ID or GITHUB_APP_PRIVATE_KEY_PATH - refusing to act on CT $VMID"
+    exit 1
+fi
+if [ "$GITHUB_SCOPE" = "org" ]; then
+    if [ -z "${GITHUB_ORG:-}" ]; then
+        log "ERROR: $REPO_CONF sets GITHUB_SCOPE=org but not GITHUB_ORG - refusing to act on CT $VMID"
+        exit 1
+    fi
+elif [ -z "${OWNERREPO:-}" ]; then
+    log "ERROR: $REPO_CONF is missing OWNERREPO - refusing to act on CT $VMID"
     exit 1
 fi
 MAX_RUNNERS="${MAX_RUNNERS:-3}"
@@ -145,123 +168,132 @@ mkdir -p "$STATE_DIR"
 #      of PID 1 instead.
 handle_poststop() {
 
-# --- Flap guard ---
-# If registration is broken (revoked App install, bad key, GitHub API down),
-# the container could crash-loop indefinitely. Refuse to recreate more than
-# once per MIN_RECREATE_INTERVAL and make the failure loud instead.
-NOW=$(date +%s)
-LAST=0
-[ -f "$LAST_RECREATE_FILE" ] && LAST=$(cat "$LAST_RECREATE_FILE" 2>/dev/null || echo 0)
-ELAPSED=$((NOW - LAST))
+    # --- Flap guard ---
+    # If registration is broken (revoked App install, bad key, GitHub API down),
+    # the container could crash-loop indefinitely. Refuse to recreate more than
+    # once per MIN_RECREATE_INTERVAL and make the failure loud instead.
+    NOW=$(date +%s)
+    LAST=0
+    [ -f "$LAST_RECREATE_FILE" ] && LAST=$(cat "$LAST_RECREATE_FILE" 2>/dev/null || echo 0)
+    ELAPSED=$((NOW - LAST))
 
-if [ "$ELAPSED" -lt "$MIN_RECREATE_INTERVAL" ]; then
-    log "CT $VMID stopped only ${ELAPSED}s after the last recreate (< ${MIN_RECREATE_INTERVAL}s threshold)."
-    log "Refusing to recreate automatically - this usually means registration is failing repeatedly."
-    log "Check: App installation still valid? Private key readable? GitHub API reachable?"
-    log "Destroying CT $VMID but NOT creating a replacement. Fix the underlying issue, then run"
-    log "$MAIN_SCRIPT_PATH by hand (with EPHEMERAL_RUNNER=true) to resume."
-    if ! FLAP_DESTROY_ERR=$(pct destroy "$VMID" --purge 2>&1); then
-        log "Additionally, pct destroy $VMID failed: $FLAP_DESTROY_ERR"
-    fi
-    return 0
-fi
-
-echo "$NOW" > "$LAST_RECREATE_FILE"
-
-log "CT $VMID finished its job and powered off. Destroying and recreating."
-
-# Even backgrounded, the outer stop task needs a moment to release its
-# PVE-level lock on $VMID, or the first attempt fails with "container is
-# running" instead of a ZFS-level error.
-sleep 2
-
-# systemd auto-generates a .mount unit for any mounted path, independent of
-# the container's own lifecycle - pve-container@$VMID.service deactivates
-# cleanly, but its rootfs's .mount unit stays active regardless, and that's
-# what blocks pct destroy/zfs destroy with "dataset is busy" (no process has
-# an open fd - lsof/fuser confirmed that separately). Stop it explicitly
-# before destroying.
-ROOTFS_VOLID=$(pct config "$VMID" 2>/dev/null | grep '^rootfs:' | sed -E 's/^rootfs: *([^,]+),.*/\1/')
-MOUNT_UNIT=""
-if [ -n "$ROOTFS_VOLID" ]; then
-    ROOTFS_PATH=$(pvesm path "$ROOTFS_VOLID" 2>/dev/null)
-    if [ -n "$ROOTFS_PATH" ] && command -v systemd-escape >/dev/null 2>&1; then
-        MOUNT_UNIT=$(systemd-escape --path --suffix=mount "$ROOTFS_PATH")
-    fi
-fi
-
-DESTROY_OK=false
-DESTROY_ERR=""
-for attempt in $(seq 1 8); do
-    # Stop the mount unit before every attempt - systemd can
-    # regenerate/re-activate it, so this is cheap insurance each pass.
-    if [ -n "$MOUNT_UNIT" ]; then
-        systemctl stop "$MOUNT_UNIT" >/dev/null 2>&1 || true
-    fi
-    # If this container was ever inspected via `pct mount` during debugging
-    # and never unmounted, the dataset stays held indefinitely. No-op if it
-    # wasn't mounted.
-    pct unmount "$VMID" >/dev/null 2>&1 || true
-    if DESTROY_ERR=$(pct destroy "$VMID" --purge 2>&1); then
-        DESTROY_OK=true
-        break
-    fi
-    log "pct destroy $VMID attempt $attempt/8 failed, retrying in 5s: $DESTROY_ERR"
-    # Captured while still failing, not after - by the time all attempts are
-    # exhausted, whatever was holding it may have already cleared.
-    SYSTEMD_UNITS=$(systemctl list-units --all --no-legend 2>/dev/null | grep -F "$VMID" || true)
-    [ -n "$SYSTEMD_UNITS" ] && log "  (attempt $attempt) systemd units mentioning $VMID: $SYSTEMD_UNITS"
-    sleep 5
-done
-
-if [ "$DESTROY_OK" != "true" ]; then
-    log "ERROR: pct destroy $VMID failed after 8 attempts (~40s). Not attempting" \
-        "to create a replacement until this is resolved (leftover container may be in a" \
-        "bad state)."
-    log "Last error: $DESTROY_ERR"
-
-    ZFS_DATASET=$(echo "$DESTROY_ERR" | grep -oE "destroy '[^']+'" | sed -E "s/destroy '(.+)'/\1/")
-    if [ -n "$ZFS_DATASET" ]; then
-        log "Diagnostics for $ZFS_DATASET:"
-        log "  zfs holds: $(zfs holds "$ZFS_DATASET" 2>&1)"
-        MOUNTPOINT=$(zfs get -H -o value mountpoint "$ZFS_DATASET" 2>/dev/null)
-        log "  mountpoint: ${MOUNTPOINT:-unknown}"
-        log "  host mounts under it: $(mount | grep -F "${MOUNTPOINT:-__none__}" || echo "none")"
-        if [ -n "$MOUNTPOINT" ] && command -v fuser >/dev/null 2>&1; then
-            log "  fuser -vm: $(fuser -vm "$MOUNTPOINT" 2>&1)"
+    if [ "$ELAPSED" -lt "$MIN_RECREATE_INTERVAL" ]; then
+        log "CT $VMID stopped only ${ELAPSED}s after the last recreate (< ${MIN_RECREATE_INTERVAL}s threshold)."
+        log "Refusing to recreate automatically - this usually means registration is failing repeatedly."
+        log "Check: App installation still valid? Private key readable? GitHub API reachable?"
+        log "Destroying CT $VMID but NOT creating a replacement. Fix the underlying issue, then run"
+        log "$MAIN_SCRIPT_PATH by hand (with EPHEMERAL_RUNNER=true) to resume."
+        if ! FLAP_DESTROY_ERR=$(pct destroy "$VMID" --purge 2>&1); then
+            log "Additionally, pct destroy $VMID failed: $FLAP_DESTROY_ERR"
         fi
-        if [ -n "$MOUNTPOINT" ] && command -v lsof >/dev/null 2>&1; then
-            log "  lsof (first 20 lines): $(lsof +D "$MOUNTPOINT" 2>&1 | head -20)"
-        fi
-    else
-        log "Could not parse dataset name out of the destroy error to run diagnostics on."
+        return 0
     fi
 
-    return 1
-fi
+    echo "$NOW" >"$LAST_RECREATE_FILE"
 
-if [ ! -x "$MAIN_SCRIPT_PATH" ]; then
-    log "ERROR: $MAIN_SCRIPT_PATH not found or not executable. CT $VMID was destroyed" \
-        "but no replacement was created. Fix MAIN_SCRIPT_PATH in this hookscript and" \
-        "either rerun it by hand or wait for the next trigger."
-    return 1
-fi
+    log "CT $VMID finished its job and powered off. Destroying and recreating."
 
-export EPHEMERAL_RUNNER=true
-export GITHUB_APP_ID
-export GITHUB_APP_PRIVATE_KEY_PATH
-export OWNERREPO
-export MAX_RUNNERS
-[ -n "${EXTRA_INSTALL_SCRIPT:-}" ] && export EXTRA_INSTALL_SCRIPT
-[ -n "${GITHUB_APP_INSTALLATION_ID:-}" ] && export GITHUB_APP_INSTALLATION_ID
+    # This file (in the snippets directory) and the creation script are installed
+    # separately, so they can end up on different versions. Warn, don't block.
+    MAIN_VERSION=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$MAIN_SCRIPT_PATH" 2>/dev/null | head -1)
+    if [ "${MAIN_VERSION:-unknown (older than 0.1.0)}" != "$VERSION" ]; then
+        log "WARNING: hookscript is $VERSION but $MAIN_SCRIPT_PATH is ${MAIN_VERSION:-unknown (older than 0.1.0)}. Update both (see README: Upgrading)."
+    fi
 
-log "Recreating..."
-if ! "$MAIN_SCRIPT_PATH" >>"$RECREATE_LOG" 2>&1; then
-    log "ERROR: $MAIN_SCRIPT_PATH exited non-zero. Check $RECREATE_LOG."
-    return 1
-fi
+    # Even backgrounded, the outer stop task needs a moment to release its
+    # PVE-level lock on $VMID, or the first attempt fails with "container is
+    # running" instead of a ZFS-level error.
+    sleep 2
 
-log "Recreation finished (see $RECREATE_LOG for details)."
+    # systemd auto-generates a .mount unit for any mounted path, independent of
+    # the container's own lifecycle - pve-container@$VMID.service deactivates
+    # cleanly, but its rootfs's .mount unit stays active regardless, and that's
+    # what blocks pct destroy/zfs destroy with "dataset is busy" (no process has
+    # an open fd - lsof/fuser confirmed that separately). Stop it explicitly
+    # before destroying.
+    ROOTFS_VOLID=$(pct config "$VMID" 2>/dev/null | grep '^rootfs:' | sed -E 's/^rootfs: *([^,]+),.*/\1/')
+    MOUNT_UNIT=""
+    if [ -n "$ROOTFS_VOLID" ]; then
+        ROOTFS_PATH=$(pvesm path "$ROOTFS_VOLID" 2>/dev/null)
+        if [ -n "$ROOTFS_PATH" ] && command -v systemd-escape >/dev/null 2>&1; then
+            MOUNT_UNIT=$(systemd-escape --path --suffix=mount "$ROOTFS_PATH")
+        fi
+    fi
+
+    DESTROY_OK=false
+    DESTROY_ERR=""
+    for attempt in $(seq 1 8); do
+        # Stop the mount unit before every attempt - systemd can
+        # regenerate/re-activate it, so this is cheap insurance each pass.
+        if [ -n "$MOUNT_UNIT" ]; then
+            systemctl stop "$MOUNT_UNIT" >/dev/null 2>&1 || true
+        fi
+        # If this container was ever inspected via `pct mount` during debugging
+        # and never unmounted, the dataset stays held indefinitely. No-op if it
+        # wasn't mounted.
+        pct unmount "$VMID" >/dev/null 2>&1 || true
+        if DESTROY_ERR=$(pct destroy "$VMID" --purge 2>&1); then
+            DESTROY_OK=true
+            break
+        fi
+        log "pct destroy $VMID attempt $attempt/8 failed, retrying in 5s: $DESTROY_ERR"
+        # Captured while still failing, not after - by the time all attempts are
+        # exhausted, whatever was holding it may have already cleared.
+        SYSTEMD_UNITS=$(systemctl list-units --all --no-legend 2>/dev/null | grep -F "$VMID" || true)
+        [ -n "$SYSTEMD_UNITS" ] && log "  (attempt $attempt) systemd units mentioning $VMID: $SYSTEMD_UNITS"
+        sleep 5
+    done
+
+    if [ "$DESTROY_OK" != "true" ]; then
+        log "ERROR: pct destroy $VMID failed after 8 attempts (~40s). Not attempting" \
+            "to create a replacement until this is resolved (leftover container may be in a" \
+            "bad state)."
+        log "Last error: $DESTROY_ERR"
+
+        ZFS_DATASET=$(echo "$DESTROY_ERR" | grep -oE "destroy '[^']+'" | sed -E "s/destroy '(.+)'/\1/")
+        if [ -n "$ZFS_DATASET" ]; then
+            log "Diagnostics for $ZFS_DATASET:"
+            log "  zfs holds: $(zfs holds "$ZFS_DATASET" 2>&1)"
+            MOUNTPOINT=$(zfs get -H -o value mountpoint "$ZFS_DATASET" 2>/dev/null)
+            log "  mountpoint: ${MOUNTPOINT:-unknown}"
+            log "  host mounts under it: $(mount | grep -F "${MOUNTPOINT:-__none__}" || echo "none")"
+            if [ -n "$MOUNTPOINT" ] && command -v fuser >/dev/null 2>&1; then
+                log "  fuser -vm: $(fuser -vm "$MOUNTPOINT" 2>&1)"
+            fi
+            if [ -n "$MOUNTPOINT" ] && command -v lsof >/dev/null 2>&1; then
+                log "  lsof (first 20 lines): $(lsof +D "$MOUNTPOINT" 2>&1 | head -20)"
+            fi
+        else
+            log "Could not parse dataset name out of the destroy error to run diagnostics on."
+        fi
+
+        return 1
+    fi
+
+    if [ ! -x "$MAIN_SCRIPT_PATH" ]; then
+        log "ERROR: $MAIN_SCRIPT_PATH not found or not executable. CT $VMID was destroyed" \
+            "but no replacement was created. Fix MAIN_SCRIPT_PATH in this hookscript and" \
+            "either rerun it by hand or wait for the next trigger."
+        return 1
+    fi
+
+    export EPHEMERAL_RUNNER=true
+    export GITHUB_APP_ID
+    export GITHUB_APP_PRIVATE_KEY_PATH
+    export GITHUB_SCOPE
+    [ -n "${OWNERREPO:-}" ] && export OWNERREPO
+    [ -n "${GITHUB_ORG:-}" ] && export GITHUB_ORG
+    export MAX_RUNNERS
+    [ -n "${EXTRA_INSTALL_SCRIPT:-}" ] && export EXTRA_INSTALL_SCRIPT
+    [ -n "${GITHUB_APP_INSTALLATION_ID:-}" ] && export GITHUB_APP_INSTALLATION_ID
+
+    log "Recreating..."
+    if ! "$MAIN_SCRIPT_PATH" >>"$RECREATE_LOG" 2>&1; then
+        log "ERROR: $MAIN_SCRIPT_PATH exited non-zero. Check $RECREATE_LOG."
+        return 1
+    fi
+
+    log "Recreation finished (see $RECREATE_LOG for details)."
 }
 
 if [ "$PHASE" = "$DETACHED_MARKER" ]; then
@@ -282,7 +314,7 @@ fi
 # tag lookup, sourcing the per-repo config) rather than depending on
 # anything from this process's environment, so a clean re-invocation just
 # works.
-log "post-stop received for CT $VMID, relaunching detached via systemd-run"
+log "post-stop received for CT $VMID (pve-gha-runner hookscript $VERSION), relaunching detached via systemd-run"
 if command -v systemd-run >/dev/null 2>&1; then
     systemd-run --quiet --collect \
         --unit="gha-runner-hook-${VMID}-$(date +%s)" \
@@ -290,7 +322,7 @@ if command -v systemd-run >/dev/null 2>&1; then
         "$0" "$VMID" "$DETACHED_MARKER" >>"$HOOK_LOG" 2>&1
 else
     log "Warning: systemd-run not found, falling back to plain background job"
-    ( handle_poststop ) >>"$HOOK_LOG" 2>&1 &
+    (handle_poststop) >>"$HOOK_LOG" 2>&1 &
     disown
 fi
 

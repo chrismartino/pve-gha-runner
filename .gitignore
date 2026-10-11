@@ -1,0 +1,18 @@
+# GitHub App private keys and other secrets: never commit these.
+# (The README keeps the App key on the Proxmox host, outside this repo.)
+*.pem
+*.key
+.env
+.env.*
+
+# Local per-repo runner configs reference key paths; real ones live in
+# /etc/gha-runner/, only the .example file belongs in the repo.
+/*.conf
+
+# Logs and editor/OS noise
+*.log
+*.orig
+*.rej
+*.swp
+*~
+.DS_Store

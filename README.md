@@ -1,5 +1,10 @@
 # pve-gha-runner
 
+[![CI](https://github.com/chrismartino/pve-gha-runner/actions/workflows/ci.yml/badge.svg)](https://github.com/chrismartino/pve-gha-runner/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Docs site: <https://chrismartino.github.io/pve-gha-runner/>
+
 Scripts to create and manage self-hosted GitHub Actions runners as LXC
 containers on a Proxmox VE host — either as a persistent runner or as a pool
 of ephemeral, one-job-and-recreate runners.
@@ -8,6 +13,23 @@ Adapted and enhanced from
 [oNaiPs/proxmox-scripts](https://github.com/oNaiPs/proxmox-scripts)
 (`lxc_create_github_actions_runner.sh`), which is also MIT-licensed. See
 [Credits](#credits--differences-from-the-original) for what changed.
+
+> [!WARNING]
+> **Use these runners with private repositories.** On a public repository, a
+> pull request from a fork can run arbitrary code on a self-hosted runner.
+> Ephemeral containers limit the damage but do not make that safe. These
+> scripts also run **as root on your Proxmox host** — read them before you
+> run them.
+
+## Status and support
+
+- Tested on Proxmox VE 9 with Ubuntu 24.04 containers. Other versions are
+  untested.
+- Maintained on a best-effort basis, with no SLA. Questions belong in
+  [Discussions](https://github.com/chrismartino/pve-gha-runner/discussions);
+  bugs in [Issues](https://github.com/chrismartino/pve-gha-runner/issues).
+- Report security problems privately — see [SECURITY.md](SECURITY.md).
+- Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## What's here
 
@@ -47,10 +69,15 @@ into the container.
 3. Under **Repository permissions**, grant **Administration: Read and
    write** — this is what grants access to the runner
    registration-token endpoint.
-   - For **organization-level** runners instead of repo-level, grant the
-     **Organization permission** "Self-hosted runners: Read and write"
-     instead, and see [Organization-level runners](#organization-level-runners)
-     below for the one line you need to change in the script.
+   - **This is a broad permission** (it also covers repo settings and
+     branch protection). Create a **dedicated App** for this purpose, install
+     it only on the repositories that need runners, and keep its private key
+     root-only on the Proxmox host.
+   - For **organization-level** runners, grant the narrower **Organization
+     permission** "Self-hosted runners: Read and write" instead and run with
+     `GITHUB_SCOPE=org` — see
+     [Organization-level runners](#organization-level-runners). Prefer this
+     when it fits your setup.
 4. Deselect webhook subscriptions (not needed).
 5. Create the app, then generate and download a **private key (.pem)** —
    store it somewhere only root can read on the Proxmox host.
@@ -63,12 +90,25 @@ You now have three values: the App ID, the path to the `.pem` key, and the
 ## 2. Install the script on the Proxmox host
 
 ```sh
-scp create-pve-lxc-gha-runner.sh root@<pve-host>:/root/
-ssh root@<pve-host> chmod +x /root/create-pve-lxc-gha-runner.sh
+ssh root@<pve-host> install -d -m 700 /root/scripts
+scp create-pve-lxc-gha-runner.sh root@<pve-host>:/root/scripts/
+ssh root@<pve-host> chmod +x /root/scripts/create-pve-lxc-gha-runner.sh
 ```
 
 (Or `git clone https://github.com/chrismartino/pve-gha-runner.git` directly
-on the host.)
+on the host and copy the scripts into `/root/scripts/` as shown under
+[Upgrading](#upgrading).) The examples below assume you are in that
+directory (`cd /root/scripts`). This is also where the hookscript looks for
+it by default (`MAIN_SCRIPT_PATH`).
+
+Tagged [releases](https://github.com/chrismartino/pve-gha-runner/releases)
+include the scripts, a source tarball and a `SHA256SUMS` file, with build
+provenance attestations. To verify a downloaded file:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+gh attestation verify <file> --repo chrismartino/pve-gha-runner
+```
 
 ## 3. Run it
 
@@ -78,6 +118,7 @@ Creates one container that registers as a normal, long-lived runner (via
 `svc.sh install`) and keeps handling jobs until you remove it.
 
 ```sh
+cd /root/scripts
 ./create-pve-lxc-gha-runner.sh
 ```
 
@@ -109,9 +150,10 @@ without ever reusing container state between jobs.
    chmod 700 /var/lib/vz/snippets/gha_runner_hookscript.sh
    ```
 
-2. Put the creation script somewhere permanent (e.g. `/root/`). If it's not
-   at the default path, update `MAIN_SCRIPT_PATH` in the **CONFIG** block at
-   the top of `gha_runner_hookscript.sh`.
+2. Put the creation script somewhere permanent. The default is
+   `/root/scripts/create-pve-lxc-gha-runner.sh`; if it's elsewhere, update
+   `MAIN_SCRIPT_PATH` in the **CONFIG** block at the top of
+   `gha_runner_hookscript.sh`.
 
 3. For **each repo**, create a per-repo config file at
    `/etc/gha-runner/<slug>.conf`, where `<slug>` is `owner/repo` with `/`
@@ -223,7 +265,7 @@ host — it's pushed into the container and run once, before the runner
 registers:
 
 ```sh
-EXTRA_INSTALL_SCRIPT=/root/my-extra-deps.sh \
+EXTRA_INSTALL_SCRIPT=/root/scripts/my-extra-deps.sh \
 GITHUB_APP_ID=123456 \
 GITHUB_APP_PRIVATE_KEY_PATH=/root/my-app.private-key.pem \
 OWNERREPO=someorg/somerepo \
@@ -240,27 +282,61 @@ step 3 under [Ephemeral runner pool](#ephemeral-runner-pool-self-healing)).
 
 ## Organization-level runners
 
-By default the script requests a **repo-level** registration token. For an
-**org-level** runner:
+By default the script registers **repo-level** runners. For an **org-level**
+pool, set `GITHUB_SCOPE=org` and give the organization name instead of
+`OWNERREPO`:
 
-1. Grant the GitHub App the organization permission "Self-hosted runners:
-   Read and write" instead of the repo `Administration` permission.
-2. In `create-pve-lxc-gha-runner.sh`, change the registration-token request
-   URL from:
+1. Grant the GitHub App the **organization** permission "Self-hosted
+   runners: Read and write". This is narrower than the repo-level
+   `Administration` permission, so prefer it when you can.
+2. Install the App on the organization.
+3. Run the script (or the first ephemeral container) with the org scope:
 
+   ```sh
+   GITHUB_SCOPE=org \
+   GITHUB_ORG=someorg \
+   GITHUB_APP_ID=123456 \
+   GITHUB_APP_PRIVATE_KEY_PATH=/root/my-app.private-key.pem \
+   EPHEMERAL_RUNNER=true \
+   ./create-pve-lxc-gha-runner.sh
    ```
-   https://api.github.com/repos/$OWNERREPO/actions/runners/registration-token
-   ```
 
-   to:
+For the ephemeral pool's per-repo config, an org pool's file is named
+`/etc/gha-runner/org.<org>.conf` (org name lowercased) and sets
+`GITHUB_SCOPE="org"` and `GITHUB_ORG` instead of `OWNERREPO` — see
+[`examples/repo.conf.example`](examples/repo.conf.example). Containers are
+tagged `repo-org.<org>`, and `MAX_RUNNERS` applies per org.
 
-   ```
-   https://api.github.com/orgs/$ORG/actions/runners/registration-token
-   ```
+## Upgrading
 
-   (both the token-request URL and the `--url` passed to `config.sh` need
-   `$OWNERREPO` swapped for your org name — see the comments near the bottom
-   of the script).
+Check the [changelog](CHANGELOG.md): each release has an **Upgrade** line saying
+whether you need to do anything beyond the steps below. Then, from your
+clone, check out the version you want and reinstall both scripts:
+
+```sh
+git fetch --tags && git checkout <version>   # or: git pull
+install -m 700 create-pve-lxc-gha-runner.sh /root/scripts/
+install -m 700 gha_runner_hookscript.sh /var/lib/vz/snippets/
+```
+
+That's it. Running containers pick up the new hookscript the next time they
+stop and are recreated; you don't need to touch them. To roll back, check out
+the previous version and run the two `install` commands again.
+
+To see which version is installed:
+
+```sh
+/root/scripts/create-pve-lxc-gha-runner.sh --version
+grep -m1 '^VERSION=' /var/lib/vz/snippets/gha_runner_hookscript.sh
+```
+
+After the next job, `journalctl -t gha-runner-hook` also shows the hookscript's
+version, and logs a warning if it differs from the creation script's.
+
+Both commands are needed because Proxmox runs the **copy in the snippets
+directory**, not the file in your clone. Adjust the paths if you changed
+`MAIN_SCRIPT_PATH` or use a different snippets storage, and if you edited the
+CONFIG block at the top of the hookscript, re-apply that edit afterwards.
 
 ## Configuration reference
 
@@ -268,12 +344,13 @@ Variables at the top of `create-pve-lxc-gha-runner.sh`:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `TEMPL_URL` | Ubuntu 24.04 LTS | Matches GitHub's own `ubuntu-latest` hosted runners. If this 404s (point-release rotation), run `pveam update && pveam available | grep ubuntu-24.04` on the host to find the current filename. |
+| `TEMPL_URL` | Ubuntu 24.04 LTS | Matches GitHub's own `ubuntu-latest` hosted runners. If this 404s (point-release rotation), run `pveam update && pveam available \| grep ubuntu-24.04` on the host to find the current filename. |
 | `PCTSIZE` | `20G` | Container disk size. |
 | `PCT_CORES` / `PCT_MEMORY` / `PCT_SWAP` | `4` / `4096` / `4096` | Container resources. |
 | `PCT_STORAGE` | `local-zfs` | Where the container's rootfs is provisioned. |
 | `TEMPL_STORAGE` | `local` | Where the Ubuntu template is downloaded (must support `vztmpl`; `local-zfs` usually doesn't). |
 | `MAX_RUNNERS` | `3` | Max concurrent `gha-runner-*` containers **for the given repo** (`repo-<slug>` tag), not a global cap across all repos. Env var. |
+| `GITHUB_SCOPE` | `repo` | `repo` (uses `OWNERREPO`) or `org` (uses `GITHUB_ORG`). Env var. See [Organization-level runners](#organization-level-runners). |
 | `EPHEMERAL_RUNNER` | `false` | Set `true` to use ephemeral mode. Env var. |
 | `EXTRA_INSTALL_SCRIPT` | (unset) | Path to a local script to run inside the container for extra dependencies. Env var. See [Installing extra dependencies](#installing-extra-dependencies). |
 | `HOOKSCRIPT_VOLID` | `local:snippets/gha_runner_hookscript.sh` | Proxmox volid of the hookscript; only used when `EPHEMERAL_RUNNER=true`. |
@@ -293,9 +370,23 @@ published SHA-256 checksum when available.
   list while `config.sh` runs — that's a limitation of the runner binary
   itself (it only accepts the token as a CLI flag), not something a wrapper
   can avoid.
+- These scripts run as root on the Proxmox host, and the hookscript sources
+  `/etc/gha-runner/<slug>.conf` as root. Keep `/etc/gha-runner/` and the
+  scripts writable by root only. Inputs (`OWNERREPO`, `GITHUB_ORG`) are
+  validated, and the repo slug read from a container tag is validated
+  before it is used to locate a config file.
+- Don't register these runners against **public** repositories (see the
+  warning at the top). Use a dedicated GitHub App, installed only where it is
+  needed.
 - Containers are unprivileged, with root's password locked (`passwd -l`)
   rather than deleted, so no PAM configuration can treat the account as
   passwordless. `pct exec`/`pct enter` from the host still work regardless.
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md). To
+report a vulnerability, use the repository's **Security** tab rather than a
+public issue.
 
 ## Credits & differences from the original
 

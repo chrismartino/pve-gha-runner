@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SHFMT_VERSION: v3.14.1
+  ACTIONLINT_VERSION: v1.7.12
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: shellcheck --version && shellcheck -S style ./*.sh examples/*.sh
+
+  shfmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install shfmt
+        run: GOBIN="$RUNNER_TEMP/bin" go install "mvdan.cc/sh/v3/cmd/shfmt@${SHFMT_VERSION}"
+      - name: shfmt
+        run: |
+          "$RUNNER_TEMP/bin/shfmt" -d -i 4 -ci ./*.sh examples/*.sh
+
+  syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: bash -n
+        run: |
+          for f in ./*.sh examples/*.sh; do
+            echo "bash -n $f"
+            bash -n "$f"
+          done
+      - name: Scripts are executable
+        run: |
+          bad=0
+          for f in create-pve-lxc-gha-runner.sh stop-and-cleanup-gha-runners.sh; do
+            if [ ! -x "$f" ]; then echo "::error file=$f::not executable in git"; bad=1; fi
+          done
+          exit "$bad"
+      - name: No CRLF line endings
+        run: |
+          if git ls-files -z '*.sh' '*.yml' '*.md' | xargs -0 grep -lI $'\r'; then
+            echo "::error::CRLF line endings found"
+            exit 1
+          fi
+
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Both scripts carry the same VERSION
+        run: |
+          a=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' create-pve-lxc-gha-runner.sh | head -1)
+          b=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' gha_runner_hookscript.sh | head -1)
+          echo "create-pve-lxc-gha-runner.sh: ${a:-<missing>}"
+          echo "gha_runner_hookscript.sh:     ${b:-<missing>}"
+          if [ -z "$a" ] || [ "$a" != "$b" ]; then
+            echo "::error::VERSION is missing or differs between the two scripts"
+            exit 1
+          fi
+
+  markdownlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
+        with:
+          globs: |
+            *.md
+            .github/**/*.md
+
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint
+        run: GOBIN="$RUNNER_TEMP/bin" go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+      - name: actionlint
+        run: |
+          "$RUNNER_TEMP/bin/actionlint" -color
+
+  zizmor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          advanced-security: false
