@@ -301,6 +301,52 @@ For the ephemeral pool's per-repo config, an org pool's file is named
 [`examples/repo.conf.example`](examples/repo.conf.example). Containers are
 tagged `repo-org.<org>`, and `MAX_RUNNERS` applies per org.
 
+## Upgrading
+
+Two copies of the logic live on the Proxmox host: the creation script (at
+`MAIN_SCRIPT_PATH`, `/root/create-pve-lxc-gha-runner.sh` by default) and the
+hookscript that Proxmox actually runs, which is the **copy in your snippets
+directory** (`/var/lib/vz/snippets/gha_runner_hookscript.sh` by default), not
+the file in your clone. Always update **both**, or the pool will mix old and
+new behavior.
+
+1. **Read the release notes** and the [changelog](CHANGELOG.md) for every
+   version between yours and the new one. Each release says either "no action
+   needed" or lists the exact steps; anything that breaks existing setups is
+   marked **Breaking**.
+2. **Get and verify the release** (see [step 2](#2-install-the-script-on-the-proxmox-host)
+   for the checksum and attestation commands), or `git pull` your clone.
+3. **Back up** the current copies so you can roll back:
+
+   ```sh
+   cp /root/create-pve-lxc-gha-runner.sh /root/create-pve-lxc-gha-runner.sh.bak
+   cp /var/lib/vz/snippets/gha_runner_hookscript.sh /root/gha_runner_hookscript.sh.bak
+   ```
+
+4. **Install both scripts atomically.** Writing a temp file and moving it into
+   place means a recreate that is already running keeps using the old copy
+   instead of seeing a half-written file:
+
+   ```sh
+   install -m 700 create-pve-lxc-gha-runner.sh /root/create-pve-lxc-gha-runner.sh.new \
+     && mv /root/create-pve-lxc-gha-runner.sh.new /root/create-pve-lxc-gha-runner.sh
+   install -m 700 gha_runner_hookscript.sh /var/lib/vz/snippets/gha_runner_hookscript.sh.new \
+     && mv /var/lib/vz/snippets/gha_runner_hookscript.sh.new /var/lib/vz/snippets/gha_runner_hookscript.sh
+   ```
+
+   If you changed `MAIN_SCRIPT_PATH` or other values in the CONFIG block at
+   the top of the hookscript, re-apply those edits to the new copy first.
+5. **Check your configs.** Compare `/etc/gha-runner/*.conf` against
+   [`examples/repo.conf.example`](examples/repo.conf.example) for new options.
+6. **Leave running containers alone.** They reference the hookscript by its
+   volid, so the new version takes effect the next time each one stops and is
+   recreated. Confirm with one job end to end (`journalctl -t gha-runner-hook`).
+7. **Roll back** by copying the `.bak` files over the new ones.
+
+Compatibility: existing `/etc/gha-runner/*.conf` files and running containers
+keep working across minor versions. Anything that needs action from you is
+listed under **Breaking** in the changelog and in that release's notes.
+
 ## Configuration reference
 
 Variables at the top of `create-pve-lxc-gha-runner.sh`:

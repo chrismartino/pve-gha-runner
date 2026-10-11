@@ -3,7 +3,18 @@
 All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Upgrade notes
+
+Each release lists what, if anything, you must do on an existing installation
+under an **Upgrade** line, and marks incompatible changes **Breaking**. The
+general procedure is in the README's
+[Upgrading](README.md#upgrading) section.
+
 ## [Unreleased]
+
+**Upgrade:** no action needed for existing repo-level pools. Update both
+scripts as described in the README. Org-level pools (`GITHUB_SCOPE=org`) are
+opt-in.
 
 ### Added
 

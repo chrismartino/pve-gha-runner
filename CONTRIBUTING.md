@@ -42,6 +42,8 @@ bash -n create-pve-lxc-gha-runner.sh gha_runner_hookscript.sh stop-and-cleanup-g
   current approach.
 - Update the README (and `examples/`) when you change behaviour or add a
   variable.
+- Add a `CHANGELOG.md` entry. If existing installations need action to
+  upgrade, add an **Upgrade** line; mark incompatible changes **Breaking**.
 
 ## Pull requests
 
