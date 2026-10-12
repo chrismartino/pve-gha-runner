@@ -44,3 +44,12 @@ footer{border-top:1px solid var(--line);padding:24px 0 40px;color:var(--muted);f
   td{border:0;padding:4px 0}
   td::before{content:attr(data-label);display:block;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 }
+.grid.two{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.tag{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:999px;font-size:.72rem;font-weight:600;vertical-align:middle;background:var(--accent);color:#fff}
+@media (prefers-color-scheme:dark){.tag{color:#111}}
+.tag.alt{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+.card p+p{margin-top:8px}
+.card .trade{color:var(--fg);font-size:.9rem}
+#start h3{margin:26px 0 6px;font-size:1.15rem}
+ol.steps li pre{margin:8px 0 0}
+pre code{background:transparent;border:0;padding:0;color:inherit}
