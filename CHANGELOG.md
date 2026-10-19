@@ -14,6 +14,10 @@ general procedure is in the README's
 
 ### Fixed
 
+- `create-pve-lxc-gha-runner.sh` now reads `MAX_RUNNERS` from the target's
+  `/etc/gha-runner/<slug>.conf` (an exported `MAX_RUNNERS` still wins), so
+  manual runs enforce the same per-repo cap as hookscript recreations
+  (#14).
 - The release workflow attaches its assets to a release that already exists
   (for example one created from GitHub's "Draft a new release" page) instead
   of failing.
