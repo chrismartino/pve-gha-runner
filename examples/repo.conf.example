@@ -23,6 +23,8 @@ OWNERREPO="myorg/myrepo"
 # GITHUB_ORG="myorg"
 
 # Optional - all fall back to the same defaults as the main script if unset.
+# MAX_RUNNERS and EXTRA_INSTALL_SCRIPT are also read by manual runs of the
+# create script (an exported value wins).
 # MAX_RUNNERS="3"
 # EXTRA_INSTALL_SCRIPT="/root/scripts/install-docker.sh"
 # GITHUB_APP_INSTALLATION_ID=""

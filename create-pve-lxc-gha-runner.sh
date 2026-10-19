@@ -68,6 +68,8 @@ HOOKSCRIPT_VOLID="local:snippets/gha_runner_hookscript.sh"
 # Optional local script (on the Proxmox host) to install extra dependencies
 # inside the container beyond git/curl/zip. Pushed in and run once per
 # container creation - keep it fast, since ephemeral mode reruns it per job.
+# Precedence: exported env var, then EXTRA_INSTALL_SCRIPT in the target's
+# /etc/gha-runner/<slug>.conf (resolved below, once the slug is known).
 EXTRA_INSTALL_SCRIPT="${EXTRA_INSTALL_SCRIPT:-}"
 # Max concurrent gha-runner-* containers, checked via `pct list` before any
 # work starts. Applies to both manual and hookscript-triggered invocations.
@@ -178,6 +180,15 @@ MAX_RUNNERS="${MAX_RUNNERS:-3}"
 if ! [[ "$MAX_RUNNERS" =~ ^[0-9]+$ ]]; then
     echo "MAX_RUNNERS must be a non-negative integer, got: $MAX_RUNNERS" >&2
     exit 1
+fi
+
+# Same for the extra install script: the hookscript exports it from the config
+# on every recreation, so a by-hand run should pick it up from there too rather
+# than needing it exported. (Existence is checked further down.)
+if [ -z "$EXTRA_INSTALL_SCRIPT" ] && [ -f "$REPO_CONF" ]; then
+    # shellcheck source=/dev/null
+    EXTRA_INSTALL_SCRIPT=$(. "$REPO_CONF" >/dev/null 2>&1 && printf '%s' "${EXTRA_INSTALL_SCRIPT:-}") || EXTRA_INSTALL_SCRIPT=""
+    [ -n "$EXTRA_INSTALL_SCRIPT" ] && log "-- Using EXTRA_INSTALL_SCRIPT=$EXTRA_INSTALL_SCRIPT from $REPO_CONF"
 fi
 
 RUNNING_RUNNERS=0
