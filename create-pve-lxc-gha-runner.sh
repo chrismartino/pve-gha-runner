@@ -79,6 +79,9 @@ EXTRA_INSTALL_SCRIPT="${EXTRA_INSTALL_SCRIPT:-}"
 # /etc/gha-runner/<slug>.conf (resolved below, once the slug is known), then 3.
 MAX_RUNNERS="${MAX_RUNNERS:-}"
 CONFIG_DIR="/etc/gha-runner"
+# Host-wide lock held while a container ID is chosen and the container created
+# (see "Creating LXC container" below).
+CREATE_LOCK="/run/lock/gha-runner-create.lock"
 
 log() {
     local text="$1"
@@ -310,7 +313,6 @@ INSTALLATION_TOKEN=$(fetch_gh_token "installation access token" -X POST \
 }
 
 TEMPL_FILE=$(basename "$TEMPL_URL")
-PCTID=$(pvesh get /cluster/nextid)
 
 # pveam checksum-verifies against Proxmox's manifest; a raw curl download doesn't.
 log "-- Downloading $TEMPL_FILE template..."
@@ -330,12 +332,10 @@ fi
 # point Docker's own storage driver at zfs from inside the container - that
 # needs direct pool/kernel-module access an unprivileged container shouldn't
 # have. Leave Docker on overlay2.
-log "-- Creating LXC container with ID:$PCTID"
 PCT_CREATE_ARGS=(
     -arch "$PCT_ARCH"
     -ostype ubuntu
     -unprivileged 1
-    -hostname "gha-runner-$PCTID"
     -cores "$PCT_CORES"
     -memory "$PCT_MEMORY"
     -swap "$PCT_SWAP"
@@ -359,7 +359,25 @@ if [ "$EPHEMERAL_RUNNER" = "true" ]; then
     fi
     PCT_CREATE_ARGS+=(-hookscript "$HOOKSCRIPT_VOLID")
 fi
-pct create "$PCTID" "$TEMPL_FILE_PATH" "${PCT_CREATE_ARGS[@]}"
+
+# Choosing a CT ID and creating the container have to happen as one step per
+# host. `pvesh get /cluster/nextid` only returns the lowest free ID; nothing is
+# reserved until `pct create` writes the container's config. Two runs that each
+# ask first and create later (for example two repos' pools being recreated by
+# the hookscript at the same moment) get the same ID, and the second
+# `pct create` fails with "CT <id> already exists", leaving that pool a runner
+# short. So take a host-wide lock, ask for the ID inside it, and release it
+# once the config exists. The template step above is deliberately outside the
+# lock: it is the slow part and does not need serializing.
+exec 9>"$CREATE_LOCK"
+if ! flock -w 900 9; then
+    echo "Timed out waiting for the container-creation lock ($CREATE_LOCK)" >&2
+    exit 1
+fi
+PCTID=$(pvesh get /cluster/nextid)
+log "-- Creating LXC container with ID:$PCTID"
+pct create "$PCTID" "$TEMPL_FILE_PATH" -hostname "gha-runner-$PCTID" "${PCT_CREATE_ARGS[@]}"
+exec 9>&-
 
 log "-- Resizing container to $PCTSIZE"
 pct resize "$PCTID" rootfs "$PCTSIZE"
