@@ -12,6 +12,16 @@ general procedure is in the README's
 
 ## [Unreleased]
 
+### Fixed
+
+- Concurrent runs of the create script could race (#19). Two runners
+  recreated at the same time (for example two repos' pools) could pick the
+  same container ID, and one `pct create` then failed with "CT <id> already
+  exists", leaving that pool a runner short. Several runs for the same repo
+  could also all pass the `MAX_RUNNERS` check and go over the cap. The create
+  script now checks the cap, chooses the ID and creates the container under a
+  host-wide lock (`/run/lock/gha-runner-create.lock`).
+
 ## [1.2.1] - 2026-10-19
 
 **Upgrade:** update both scripts as described in the README. If a target's
