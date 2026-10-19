@@ -282,6 +282,9 @@ In ephemeral mode this reruns on **every** container recreation (once per
 job), so keep it fast. To use it with the hookscript's self-recreating pool,
 set `EXTRA_INSTALL_SCRIPT` in that repo's `/etc/gha-runner/<slug>.conf` (see
 step 3 under [Ephemeral runner pool](#ephemeral-runner-pool-self-healing)).
+The creation script reads it from that file too, so the first container you
+create by hand picks it up without exporting it; an exported
+`EXTRA_INSTALL_SCRIPT` overrides the file for a manual run.
 
 ## Organization-level runners
 
@@ -355,7 +358,7 @@ Variables at the top of `create-pve-lxc-gha-runner.sh`:
 | `MAX_RUNNERS` | `3` | Max concurrent `gha-runner-*` containers **for the given repo** (`repo-<slug>` tag), not a global cap across all repos. Env var. |
 | `GITHUB_SCOPE` | `repo` | `repo` (uses `OWNERREPO`) or `org` (uses `GITHUB_ORG`). Env var. See [Organization-level runners](#organization-level-runners). |
 | `EPHEMERAL_RUNNER` | `false` | Set `true` to use ephemeral mode. Env var. |
-| `EXTRA_INSTALL_SCRIPT` | (unset) | Path to a local script to run inside the container for extra dependencies. Env var. See [Installing extra dependencies](#installing-extra-dependencies). |
+| `EXTRA_INSTALL_SCRIPT` | (unset) | Path to a local script to run inside the container for extra dependencies. Env var, or set in the target's `/etc/gha-runner/<slug>.conf` (an exported value wins). See [Installing extra dependencies](#installing-extra-dependencies). |
 | `HOOKSCRIPT_VOLID` | `local:snippets/gha_runner_hookscript.sh` | Proxmox volid of the hookscript; only used when `EPHEMERAL_RUNNER=true`. |
 
 Runner version is **not** pinned — the script resolves and downloads the
