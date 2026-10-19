@@ -12,6 +12,13 @@ general procedure is in the README's
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-19
+
+**Upgrade:** update both scripts as described in the README. If a target's
+`/etc/gha-runner/<slug>.conf` sets `MAX_RUNNERS` or `EXTRA_INSTALL_SCRIPT`,
+manual runs of the create script now use those values too, so make sure the
+`EXTRA_INSTALL_SCRIPT` path exists. Running containers need no changes.
+
 ### Fixed
 
 - `create-pve-lxc-gha-runner.sh` now reads `MAX_RUNNERS` from the target's
