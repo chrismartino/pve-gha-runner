@@ -194,17 +194,34 @@ if [ -z "$EXTRA_INSTALL_SCRIPT" ] && [ -f "$REPO_CONF" ]; then
     [ -n "$EXTRA_INSTALL_SCRIPT" ] && log "-- Using EXTRA_INSTALL_SCRIPT=$EXTRA_INSTALL_SCRIPT from $REPO_CONF"
 fi
 
-RUNNING_RUNNERS=0
-for ctid in $(pct list 2>/dev/null | awk 'NR>1 && $NF ~ /^gha-runner-/ {print $1}'); do
-    CTTAGS=$(pct config "$ctid" 2>/dev/null | awk -F': ' '/^tags:/ {print $2}')
-    # Tolerate comma as well as the standard semicolon separator, in case of
-    # older PVE versions or manually-edited tags.
-    case ";$(echo "$CTTAGS" | tr ',' ';');" in
-        *";repo-$REPO_SLUG;"*) RUNNING_RUNNERS=$((RUNNING_RUNNERS + 1)) ;;
-    esac
-done
-if [ "$RUNNING_RUNNERS" -ge "$MAX_RUNNERS" ]; then
-    log "Already at MAX_RUNNERS ($MAX_RUNNERS) for $TARGET: found $RUNNING_RUNNERS existing gha-runner-* container(s) tagged repo-$REPO_SLUG. Not creating another."
+# Prints how many gha-runner-* containers are tagged for this target.
+count_runners() {
+    local n=0 ctid cttags
+    for ctid in $(pct list 2>/dev/null | awk 'NR>1 && $NF ~ /^gha-runner-/ {print $1}'); do
+        cttags=$(pct config "$ctid" 2>/dev/null | awk -F': ' '/^tags:/ {print $2}')
+        # Tolerate comma as well as the standard semicolon separator, in case
+        # of older PVE versions or manually-edited tags.
+        case ";$(echo "$cttags" | tr ',' ';');" in
+            *";repo-$REPO_SLUG;"*) n=$((n + 1)) ;;
+        esac
+    done
+    echo "$n"
+}
+
+# Returns 0 (after logging why) when the target is already at MAX_RUNNERS.
+# Checked once here, so a run that is not needed stops before doing any work,
+# and again under the creation lock below, which is the check that counts when
+# several runs for the same target start together.
+at_max_runners() {
+    RUNNING_RUNNERS=$(count_runners)
+    if [ "$RUNNING_RUNNERS" -ge "$MAX_RUNNERS" ]; then
+        log "Already at MAX_RUNNERS ($MAX_RUNNERS) for $TARGET: found $RUNNING_RUNNERS existing gha-runner-* container(s) tagged repo-$REPO_SLUG. Not creating another."
+        return 0
+    fi
+    return 1
+}
+
+if at_max_runners; then
     exit 0
 fi
 
@@ -367,12 +384,20 @@ fi
 # the hookscript at the same moment) get the same ID, and the second
 # `pct create` fails with "CT <id> already exists", leaving that pool a runner
 # short. So take a host-wide lock, ask for the ID inside it, and release it
-# once the config exists. The template step above is deliberately outside the
+# once the config exists. The same lock makes the MAX_RUNNERS check atomic
+# with the creation. The template step above is deliberately outside the
 # lock: it is the slow part and does not need serializing.
 exec 9>"$CREATE_LOCK"
 if ! flock -w 900 9; then
     echo "Timed out waiting for the container-creation lock ($CREATE_LOCK)" >&2
     exit 1
+fi
+# Re-check the cap now that creations are serialized. The check near the top
+# can't be trusted on its own: runs for the same target that start together all
+# count the same containers, all pass, and then all create one, going over
+# MAX_RUNNERS. Here each run sees the containers the runs before it created.
+if at_max_runners; then
+    exit 0
 fi
 PCTID=$(pvesh get /cluster/nextid)
 log "-- Creating LXC container with ID:$PCTID"
