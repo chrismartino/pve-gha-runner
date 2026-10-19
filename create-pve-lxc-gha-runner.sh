@@ -73,7 +73,10 @@ EXTRA_INSTALL_SCRIPT="${EXTRA_INSTALL_SCRIPT:-}"
 # work starts. Applies to both manual and hookscript-triggered invocations.
 # The hookscript always requests exactly one replacement per job, so this is
 # a ceiling/safety-net, not something that actively tops the pool back up.
-MAX_RUNNERS="${MAX_RUNNERS:-3}"
+# Precedence: exported env var, then MAX_RUNNERS in the target's
+# /etc/gha-runner/<slug>.conf (resolved below, once the slug is known), then 3.
+MAX_RUNNERS="${MAX_RUNNERS:-}"
+CONFIG_DIR="/etc/gha-runner"
 
 log() {
     local text="$1"
@@ -161,6 +164,21 @@ case "$GITHUB_SCOPE" in
         exit 1
         ;;
 esac
+
+# Honor the per-target cap from the same config the hookscript sources, so
+# manual runs and hookscript recreations enforce the same MAX_RUNNERS. Sourced
+# in a subshell so only that one value is taken from the file.
+REPO_CONF="$CONFIG_DIR/$REPO_SLUG.conf"
+if [ -z "$MAX_RUNNERS" ] && [ -f "$REPO_CONF" ]; then
+    # shellcheck source=/dev/null
+    MAX_RUNNERS=$(. "$REPO_CONF" >/dev/null 2>&1 && printf '%s' "${MAX_RUNNERS:-}") || MAX_RUNNERS=""
+    [ -n "$MAX_RUNNERS" ] && log "-- Using MAX_RUNNERS=$MAX_RUNNERS from $REPO_CONF"
+fi
+MAX_RUNNERS="${MAX_RUNNERS:-3}"
+if ! [[ "$MAX_RUNNERS" =~ ^[0-9]+$ ]]; then
+    echo "MAX_RUNNERS must be a non-negative integer, got: $MAX_RUNNERS" >&2
+    exit 1
+fi
 
 RUNNING_RUNNERS=0
 for ctid in $(pct list 2>/dev/null | awk 'NR>1 && $NF ~ /^gha-runner-/ {print $1}'); do

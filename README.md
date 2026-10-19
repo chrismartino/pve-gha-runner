@@ -216,7 +216,9 @@ post-stop time could otherwise cause.
 **Runner pool size:** `MAX_RUNNERS` (default `3`) is **per repo** — it caps
 how many `gha-runner-*` containers tagged for a given repo (`repo-<slug>`)
 can exist concurrently, checked before any container is created, whether
-triggered by hand or by the hookscript. Different repos can have different
+triggered by hand or by the hookscript. Both read it from that repo's
+`/etc/gha-runner/<slug>.conf`; an exported `MAX_RUNNERS` overrides the file
+for a manual run. Different repos can have different
 pool sizes. Raise it for a given repo either by exporting it for a manual
 run, or by setting `MAX_RUNNERS` in that repo's `/etc/gha-runner/<slug>.conf`
 so the hookscript picks it up on every recreation:
