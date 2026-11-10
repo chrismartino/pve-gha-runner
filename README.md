@@ -288,6 +288,29 @@ The creation script reads it from that file too, so the first container you
 create by hand picks it up without exporting it; an exported
 `EXTRA_INSTALL_SCRIPT` overrides the file for a manual run.
 
+## DHCP leases and static MACs
+
+Proxmox gives each new container a random MAC, and Ubuntu's DHCP client builds
+its client ID from a machine ID that is new on every container's first boot. In
+ephemeral mode every job therefore looks like a new DHCP client, and each
+destroyed runner's lease lingers until it expires, which can use up a small
+DHCP range.
+
+New containers now get a **deterministic MAC** (`02:67` plus the container ID as
+four hex bytes, so ID 112 gets `02:67:00:00:00:70`) and a DHCP client that uses
+it as its **client ID** (a systemd-networkd drop-in written before first boot).
+A recreated runner usually gets its old container ID back, so it presents the
+same identity and reuses its lease.
+
+- Running containers are unchanged. Once your runners have been recreated, you
+  can raise a DHCP lease time you had shortened to cope with the churn.
+- For fixed IPs, create DHCP reservations for the MACs of your runners'
+  container IDs.
+- If the drop-in can't be written, the script warns and uses the container's
+  default client ID.
+- `PCT_STATIC_MAC=false`, exported or in the repo's
+  `/etc/gha-runner/<slug>.conf`, restores random MACs.
+
 ## Organization-level runners
 
 By default the script registers **repo-level** runners. For an **org-level**
@@ -360,6 +383,7 @@ Variables at the top of `create-pve-lxc-gha-runner.sh`:
 | `MAX_RUNNERS` | `3` | Max concurrent `gha-runner-*` containers **for the given repo** (`repo-<slug>` tag), not a global cap across all repos. Env var. |
 | `GITHUB_SCOPE` | `repo` | `repo` (uses `OWNERREPO`) or `org` (uses `GITHUB_ORG`). Env var. See [Organization-level runners](#organization-level-runners). |
 | `EPHEMERAL_RUNNER` | `false` | Set `true` to use ephemeral mode. Env var. |
+| `PCT_STATIC_MAC` | `true` | Deterministic MAC and MAC-based DHCP client ID, so a recreated runner reuses its DHCP lease. `false` restores random MACs. Env var, or in the target's `/etc/gha-runner/<slug>.conf` (an exported value wins). See [DHCP leases and static MACs](#dhcp-leases-and-static-macs). |
 | `EXTRA_INSTALL_SCRIPT` | (unset) | Path to a local script to run inside the container for extra dependencies. Env var, or set in the target's `/etc/gha-runner/<slug>.conf` (an exported value wins). See [Installing extra dependencies](#installing-extra-dependencies). |
 | `HOOKSCRIPT_VOLID` | `local:snippets/gha_runner_hookscript.sh` | Proxmox volid of the hookscript; only used when `EPHEMERAL_RUNNER=true`. |
 

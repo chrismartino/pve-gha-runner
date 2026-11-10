@@ -22,6 +22,8 @@
 #   5. Only git/curl/zip installed by default, plus
 #      ./bin/installdependencies.sh (the runner's own OS-dependency
 #      installer). Anything else your jobs need goes in EXTRA_INSTALL_SCRIPT.
+#   6. Deterministic MAC and a MAC-based DHCP client ID, so a recreated runner
+#      reuses its DHCP lease (PCT_STATIC_MAC, on by default).
 #
 # Prerequisites:
 #   - A GitHub App with Repository permission "Administration: Read and
@@ -82,6 +84,13 @@ CONFIG_DIR="/etc/gha-runner"
 # Host-wide lock held while a container ID is chosen and the container created
 # (see "Creating LXC container" below).
 CREATE_LOCK="/run/lock/gha-runner-create.lock"
+# A new container's MAC is PCT_MAC_PREFIX plus its ID as four hex bytes (ID 112
+# -> 02:67:00:00:00:70), and its DHCP client uses that MAC as its client ID, so
+# a recreated runner reuses its DHCP lease instead of leaving a new one behind.
+# PCT_STATIC_MAC=false restores random MACs. Precedence: exported env var, then
+# the target's /etc/gha-runner/<slug>.conf, then true.
+PCT_MAC_PREFIX="02:67"
+PCT_STATIC_MAC="${PCT_STATIC_MAC:-}"
 
 log() {
     local text="$1"
@@ -193,6 +202,21 @@ if [ -z "$EXTRA_INSTALL_SCRIPT" ] && [ -f "$REPO_CONF" ]; then
     EXTRA_INSTALL_SCRIPT=$(. "$REPO_CONF" >/dev/null 2>&1 && printf '%s' "${EXTRA_INSTALL_SCRIPT:-}") || EXTRA_INSTALL_SCRIPT=""
     [ -n "$EXTRA_INSTALL_SCRIPT" ] && log "-- Using EXTRA_INSTALL_SCRIPT=$EXTRA_INSTALL_SCRIPT from $REPO_CONF"
 fi
+
+# Same for PCT_STATIC_MAC.
+if [ -z "$PCT_STATIC_MAC" ] && [ -f "$REPO_CONF" ]; then
+    # shellcheck source=/dev/null
+    PCT_STATIC_MAC=$(. "$REPO_CONF" >/dev/null 2>&1 && printf '%s' "${PCT_STATIC_MAC:-}") || PCT_STATIC_MAC=""
+    [ -n "$PCT_STATIC_MAC" ] && log "-- Using PCT_STATIC_MAC=$PCT_STATIC_MAC from $REPO_CONF"
+fi
+PCT_STATIC_MAC="${PCT_STATIC_MAC:-true}"
+case "$PCT_STATIC_MAC" in
+    true | false) ;;
+    *)
+        echo "PCT_STATIC_MAC must be true or false, got: $PCT_STATIC_MAC" >&2
+        exit 1
+        ;;
+esac
 
 # Prints how many gha-runner-* containers are tagged for this target.
 count_runners() {
@@ -344,6 +368,41 @@ else
     TEMPL_FILE_PATH="$TEMPL_FILE"
 fi
 
+# Prints the MAC for a container ID: PCT_MAC_PREFIX plus the ID as four hex bytes.
+mac_for_id() {
+    local id="$1"
+    printf '%s:%02X:%02X:%02X:%02X' "$PCT_MAC_PREFIX" $((id >> 24 & 255)) $((id >> 16 & 255)) $((id >> 8 & 255)) $((id & 255))
+}
+
+# Makes the container's DHCP client use its MAC as the client ID, with a
+# systemd-networkd drop-in written to the stopped container's rootfs. It must
+# exist before the first boot, or the first lease is requested under networkd's
+# machine-id-based ID. Returns 1 if the drop-in couldn't be written (the
+# container is unchanged), 2 if the unmount failed (the container stays locked).
+set_dhcp_client_id_mac() {
+    local id="$1" root dir owner rc=0
+    root="/var/lib/lxc/$id/rootfs"
+    pct mount "$id" >/dev/null || return 1
+    dir="$root/etc/systemd/network/eth0.network.d"
+    if [ -d "$root/etc/systemd/network" ]; then
+        # Unprivileged containers' files are owned by the mapped root, so copy
+        # the owner of /etc.
+        owner=$(stat -c '%u:%g' "$root/etc" 2>/dev/null || true)
+        if mkdir -p "$dir" &&
+            printf '[DHCPv4]\nClientIdentifier=mac\n' >"$dir/10-gha-runner.conf" &&
+            chmod 0644 "$dir/10-gha-runner.conf" &&
+            { [ -z "$owner" ] || chown -R "$owner" "$dir"; }; then
+            :
+        else
+            rc=1
+        fi
+    else
+        rc=1
+    fi
+    pct unmount "$id" >/dev/null || rc=2
+    return "$rc"
+}
+
 # ZFS notes: Docker's overlay2 driver works fine on a ZFS-backed rootfs
 # (OpenZFS has supported the d_type flag overlayfs needs since 0.8.x). Don't
 # point Docker's own storage driver at zfs from inside the container - that
@@ -358,7 +417,6 @@ PCT_CREATE_ARGS=(
     -swap "$PCT_SWAP"
     -storage "$PCT_STORAGE"
     -features "nesting=1,keyctl=1,fuse=1"
-    -net0 "name=eth0,bridge=vmbr0,ip=dhcp,type=veth"
     # "repo-<slug>" lets one hookscript serve multiple repos: it reads this
     # tag back at post-stop time to know which repo/App config to use,
     # instead of having a single repo hardcoded in the hookscript file.
@@ -400,12 +458,30 @@ if at_max_runners; then
     exit 0
 fi
 PCTID=$(pvesh get /cluster/nextid)
-log "-- Creating LXC container with ID:$PCTID"
-pct create "$PCTID" "$TEMPL_FILE_PATH" -hostname "gha-runner-$PCTID" "${PCT_CREATE_ARGS[@]}"
+NET0="name=eth0,bridge=vmbr0,ip=dhcp,type=veth"
+if [ "$PCT_STATIC_MAC" = "true" ]; then
+    NET0="$NET0,hwaddr=$(mac_for_id "$PCTID")"
+fi
+log "-- Creating LXC container with ID:$PCTID (net0: $NET0)"
+pct create "$PCTID" "$TEMPL_FILE_PATH" -hostname "gha-runner-$PCTID" -net0 "$NET0" "${PCT_CREATE_ARGS[@]}"
 exec 9>&-
 
 log "-- Resizing container to $PCTSIZE"
 pct resize "$PCTID" rootfs "$PCTSIZE"
+
+if [ "$PCT_STATIC_MAC" = "true" ]; then
+    log "-- Setting the DHCP client identifier to the MAC (before first boot)"
+    rc=0
+    set_dhcp_client_id_mac "$PCTID" || rc=$?
+    case "$rc" in
+        0) ;;
+        2)
+            echo "Could not unmount container $PCTID after configuring it, so it can't be started." >&2
+            exit 1
+            ;;
+        *) log "-- Warning: could not set the DHCP client identifier; this runner will present a new DHCP client ID every time it is recreated" ;;
+    esac
+fi
 
 log "-- Starting container"
 pct start "$PCTID"
