@@ -12,6 +12,12 @@ general procedure is in the README's
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-10
+
+**Upgrade:** update both scripts as described in the README. Running
+containers need no changes; only containers created afterwards get the
+deterministic MAC.
+
 ### Changed
 
 - New runner containers get a deterministic MAC (`02:67` plus the container ID
