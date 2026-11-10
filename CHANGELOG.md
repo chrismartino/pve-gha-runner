@@ -12,6 +12,14 @@ general procedure is in the README's
 
 ## [Unreleased]
 
+### Changed
+
+- New runner containers get a deterministic MAC (`02:67` plus the container ID
+  in hex) and their DHCP client uses it as the client identifier, so a
+  recreated runner reuses its DHCP lease instead of leaving a new one behind
+  for every job (#24). Running containers are unchanged. Set
+  `PCT_STATIC_MAC=false` to keep random MACs.
+
 ### Fixed
 
 - Concurrent runs of the create script could race (#19). Two runners
