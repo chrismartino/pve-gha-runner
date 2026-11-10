@@ -302,8 +302,7 @@ it as its **client ID** (a systemd-networkd drop-in written before first boot).
 A recreated runner usually gets its old container ID back, so it presents the
 same identity and reuses its lease.
 
-- Running containers are unchanged. Once your runners have been recreated, you
-  can raise a DHCP lease time you had shortened to cope with the churn.
+- Running containers are unchanged.
 - For fixed IPs, create DHCP reservations for the MACs of your runners'
   container IDs.
 - If the drop-in can't be written, the script warns and uses the container's
