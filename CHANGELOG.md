@@ -16,8 +16,7 @@ general procedure is in the README's
 
 **Upgrade:** update both scripts as described in the README. Running
 containers need no changes; only containers created afterwards get the
-deterministic MAC. Once your runners have been recreated, you can raise a DHCP
-lease time you had shortened to cope with lease churn.
+deterministic MAC.
 
 ### Changed
 
