@@ -53,3 +53,4 @@ footer{border-top:1px solid var(--line);padding:24px 0 40px;color:var(--muted);f
 #start h3{margin:26px 0 6px;font-size:1.15rem}
 ol.steps li pre{margin:8px 0 0}
 pre code{background:transparent;border:0;padding:0;color:inherit}
+td[data-label="Default"] code{white-space:nowrap}

@@ -38,6 +38,7 @@
     <div class="card">
       <h3>Ephemeral pool <span class="tag alt">opt-in</span></h3>
       <p>Set <code>EPHEMERAL_RUNNER=true</code>. Each container runs exactly one job, powers off, and a Proxmox hookscript destroys it and creates a fresh replacement, so there is always a clean runner.</p>
+      <p>New containers get a MAC derived from their ID and a MAC-based DHCP client ID, so a recreated runner reuses its DHCP lease instead of leaving a new one behind for every job. <a href="https://github.com/chrismartino/pve-gha-runner#dhcp-leases-and-static-macs">Details</a></p>
       <p class="trade">Needs a hookscript and a per-repo config file. No state carries between jobs.</p>
     </div>
   </div>
@@ -104,6 +105,7 @@ OWNERREPO=someorg/somerepo \
       <tr><td data-label="Variable"><code>GITHUB_SCOPE</code></td><td data-label="Default"><code>repo</code></td><td data-label="Purpose"><code>repo</code> (uses <code>OWNERREPO</code>) or <code>org</code> (uses <code>GITHUB_ORG</code>).</td></tr>
       <tr><td data-label="Variable"><code>MAX_RUNNERS</code></td><td data-label="Default"><code>3</code></td><td data-label="Purpose">Max concurrent runners per repo or org.</td></tr>
       <tr><td data-label="Variable"><code>EXTRA_INSTALL_SCRIPT</code></td><td data-label="Default">unset</td><td data-label="Purpose">Script to run inside the container before registration.</td></tr>
+      <tr><td data-label="Variable"><code>PCT_STATIC_MAC</code></td><td data-label="Default"><code>true</code></td><td data-label="Purpose">Deterministic MAC and a MAC-based DHCP client ID, so a recreated runner reuses its DHCP lease. <code>false</code> restores random MACs.</td></tr>
       <tr><td data-label="Variable"><code>PCT_STORAGE</code></td><td data-label="Default"><code>local-zfs</code></td><td data-label="Purpose">Storage for the container rootfs.</td></tr>
       <tr><td data-label="Variable"><code>PCT_CORES</code> / <code>PCT_MEMORY</code></td><td data-label="Default"><code>4</code> / <code>4096</code></td><td data-label="Purpose">Container resources.</td></tr>
     </tbody>
