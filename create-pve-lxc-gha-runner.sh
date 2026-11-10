@@ -22,9 +22,8 @@
 #   5. Only git/curl/zip installed by default, plus
 #      ./bin/installdependencies.sh (the runner's own OS-dependency
 #      installer). Anything else your jobs need goes in EXTRA_INSTALL_SCRIPT.
-#   6. Deterministic MAC (from the container ID) and a MAC-based DHCP client
-#      ID, so a recreated runner reuses its DHCP lease instead of leaving a
-#      new one behind for every job (PCT_STATIC_MAC, on by default).
+#   6. Deterministic MAC and a MAC-based DHCP client ID, so a recreated runner
+#      reuses its DHCP lease (PCT_STATIC_MAC, on by default).
 #
 # Prerequisites:
 #   - A GitHub App with Repository permission "Administration: Read and
@@ -85,16 +84,11 @@ CONFIG_DIR="/etc/gha-runner"
 # Host-wide lock held while a container ID is chosen and the container created
 # (see "Creating LXC container" below).
 CREATE_LOCK="/run/lock/gha-runner-create.lock"
-# Containers get a deterministic MAC (PCT_MAC_PREFIX + the container ID as four
-# hex bytes, e.g. ID 112 -> 02:67:00:00:00:70) and their DHCP client uses that
-# MAC as its client identifier, so a runner that is destroyed and recreated
-# presents the same identity to the DHCP server and reuses its lease, instead
-# of leaving a new lease behind for every job. Without this, Proxmox picks a
-# random MAC per container and systemd-networkd derives a new DHCP client ID
-# from each container's fresh /etc/machine-id. "02" marks the address as
-# locally administered unicast. Set PCT_STATIC_MAC=false to go back to random
-# MACs. Precedence: exported env var, then PCT_STATIC_MAC in the target's
-# /etc/gha-runner/<slug>.conf, then true.
+# A new container's MAC is PCT_MAC_PREFIX plus its ID as four hex bytes (ID 112
+# -> 02:67:00:00:00:70), and its DHCP client uses that MAC as its client ID, so
+# a recreated runner reuses its DHCP lease instead of leaving a new one behind.
+# PCT_STATIC_MAC=false restores random MACs. Precedence: exported env var, then
+# the target's /etc/gha-runner/<slug>.conf, then true.
 PCT_MAC_PREFIX="02:67"
 PCT_STATIC_MAC="${PCT_STATIC_MAC:-}"
 
@@ -209,8 +203,7 @@ if [ -z "$EXTRA_INSTALL_SCRIPT" ] && [ -f "$REPO_CONF" ]; then
     [ -n "$EXTRA_INSTALL_SCRIPT" ] && log "-- Using EXTRA_INSTALL_SCRIPT=$EXTRA_INSTALL_SCRIPT from $REPO_CONF"
 fi
 
-# And for PCT_STATIC_MAC, so a by-hand run and the hookscript's recreations
-# behave the same.
+# Same for PCT_STATIC_MAC.
 if [ -z "$PCT_STATIC_MAC" ] && [ -f "$REPO_CONF" ]; then
     # shellcheck source=/dev/null
     PCT_STATIC_MAC=$(. "$REPO_CONF" >/dev/null 2>&1 && printf '%s' "${PCT_STATIC_MAC:-}") || PCT_STATIC_MAC=""
@@ -375,29 +368,25 @@ else
     TEMPL_FILE_PATH="$TEMPL_FILE"
 fi
 
-# Prints the deterministic MAC for a container ID: PCT_MAC_PREFIX followed by
-# the ID as four hex bytes.
+# Prints the MAC for a container ID: PCT_MAC_PREFIX plus the ID as four hex bytes.
 mac_for_id() {
     local id="$1"
     printf '%s:%02X:%02X:%02X:%02X' "$PCT_MAC_PREFIX" $((id >> 24 & 255)) $((id >> 16 & 255)) $((id >> 8 & 255)) $((id & 255))
 }
 
-# Makes the container's DHCP client use its MAC as the client identifier, by
-# adding a systemd-networkd drop-in to the (stopped) container's root
-# filesystem. This has to happen before the first boot: networkd's default
-# client ID is built from the machine-id, which a new container generates on
-# first boot, and a lease requested under that ID would be left behind.
-# Returns 0 on success, 1 if the drop-in could not be written (the container
-# is untouched and still usable), 2 if the filesystem could not be unmounted
-# again (the container is locked and cannot be started).
+# Makes the container's DHCP client use its MAC as the client ID, with a
+# systemd-networkd drop-in written to the stopped container's rootfs. It must
+# exist before the first boot, or the first lease is requested under networkd's
+# machine-id-based ID. Returns 1 if the drop-in couldn't be written (the
+# container is unchanged), 2 if the unmount failed (the container stays locked).
 set_dhcp_client_id_mac() {
     local id="$1" root dir owner rc=0
     root="/var/lib/lxc/$id/rootfs"
     pct mount "$id" >/dev/null || return 1
     dir="$root/etc/systemd/network/eth0.network.d"
     if [ -d "$root/etc/systemd/network" ]; then
-        # An unprivileged container's files are owned by its mapped root, not
-        # by 0; copy the owner of /etc instead of assuming the mapping.
+        # Unprivileged containers' files are owned by the mapped root, so copy
+        # the owner of /etc.
         owner=$(stat -c '%u:%g' "$root/etc" 2>/dev/null || true)
         if mkdir -p "$dir" &&
             printf '[DHCPv4]\nClientIdentifier=mac\n' >"$dir/10-gha-runner.conf" &&
