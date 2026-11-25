@@ -381,10 +381,10 @@ mac_for_id() {
 # the run and leave an idle, unregistered runner. So retry the start, and treat
 # "can pct exec and has an address" as the real success test.
 start_container() {
-    local id="$1" attempt i
+    local id="$1" attempt
     for attempt in 1 2 3 4 5; do
         pct start "$id" || log "-- pct start $id attempt $attempt/5 failed, checking whether it came up"
-        for i in $(seq 1 30); do
+        for _ in $(seq 1 30); do
             if pct exec "$id" -- bash -c 'ip -4 -o addr show dev eth0 2>/dev/null | grep -q inet' >/dev/null 2>&1; then
                 return 0
             fi
