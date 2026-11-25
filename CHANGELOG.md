@@ -12,6 +12,16 @@ general procedure is in the README's
 
 ## [Unreleased]
 
+### Fixed
+
+- Runners recreated at the same moment could end up running but never
+  registered. `pct start` sometimes failed with "unable to get PID for CT
+  <id>" while the container came up anyway, and the create script aborted
+  before installing the runner. The script now retries the start and waits
+  until the container accepts commands and has an IPv4 address, replacing the
+  fixed 10-second sleep. The idle container still counted toward
+  `MAX_RUNNERS`; destroy any such leftovers with `pct destroy <id> --purge`.
+
 ## [1.3.0] - 2026-11-10
 
 **Upgrade:** update both scripts as described in the README. Running

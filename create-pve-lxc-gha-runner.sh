@@ -374,6 +374,28 @@ mac_for_id() {
     printf '%s:%02X:%02X:%02X:%02X' "$PCT_MAC_PREFIX" $((id >> 24 & 255)) $((id >> 16 & 255)) $((id >> 8 & 255)) $((id & 255))
 }
 
+# Starts the container and waits until it can run commands and has an IPv4
+# address. `pct start` can fail with "unable to get PID for CT <id>" when
+# several runners start at once (the creation lock is released before this
+# point), even though the container comes up; under `set -e` that used to abort
+# the run and leave an idle, unregistered runner. So retry the start, and treat
+# "can pct exec and has an address" as the real success test.
+start_container() {
+    local id="$1" attempt i
+    for attempt in 1 2 3 4 5; do
+        pct start "$id" || log "-- pct start $id attempt $attempt/5 failed, checking whether it came up"
+        for i in $(seq 1 30); do
+            if pct exec "$id" -- bash -c 'ip -4 -o addr show dev eth0 2>/dev/null | grep -q inet' >/dev/null 2>&1; then
+                return 0
+            fi
+            sleep 2
+        done
+        log "-- Container $id not ready after attempt $attempt/5"
+        pct status "$id" 2>/dev/null | grep -q running || continue
+    done
+    return 1
+}
+
 # Makes the container's DHCP client use its MAC as the client ID, with a
 # systemd-networkd drop-in written to the stopped container's rootfs. It must
 # exist before the first boot, or the first lease is requested under networkd's
@@ -484,8 +506,10 @@ if [ "$PCT_STATIC_MAC" = "true" ]; then
 fi
 
 log "-- Starting container"
-pct start "$PCTID"
-sleep 10
+start_container "$PCTID" || {
+    echo "Container $PCTID did not start and get an IPv4 address." >&2
+    exit 1
+}
 
 log "-- Running updates"
 # passwd -l (lock) instead of -d (delete): an empty password can mean "no
