@@ -254,7 +254,10 @@ fi
 # actions-runner-linux-x64-2.336.0.tar.gz), so the version has to be looked
 # up first - there's no unversioned alias that resolves.
 log "-- Resolving latest actions/runner release"
-RUNNER_RELEASE_JSON=$(curl -fsS -H "Accept: application/vnd.github+json" \
+# --retry covers timeouts and transient responses (such as 502, 503 and 504).
+# Without it, one GitHub hiccup ends the run and the pool stays a runner short.
+RUNNER_RELEASE_JSON=$(curl -fsS --retry 5 --retry-max-time 120 \
+    -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/actions/runner/releases/latest")
 RUNNER_TAG=$(echo "$RUNNER_RELEASE_JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
 RUNNER_VERSION="${RUNNER_TAG#v}"

@@ -21,6 +21,9 @@ general procedure is in the README's
   until the container accepts commands and has an IPv4 address, replacing the
   fixed 10-second sleep. The idle container still counted toward
   `MAX_RUNNERS`; destroy any such leftovers with `pct destroy <id> --purge`.
+- A transient GitHub error (such as a 504) while looking up the latest runner
+  release ended the create script, leaving the pool a runner short. The
+  lookup is now retried.
 
 ## [1.3.0] - 2026-11-10
 
